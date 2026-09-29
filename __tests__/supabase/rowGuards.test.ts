@@ -15,6 +15,9 @@ function expenseRow(overrides: Record<string, unknown> = {}) {
     shares: [{ memberId: "member-1", name: "Alex", amount: "20.00", paid: false }],
     created_at: "2026-01-01T00:00:00.000Z",
     settled: false,
+    created_by_wallet: "GCREATOR",
+    member_wallets: ["GCREATOR"],
+    accepted_wallets: ["GCREATOR"],
     ...overrides,
   };
 }
@@ -29,7 +32,9 @@ describe("Supabase row guards", () => {
       members: [member],
       expense_ids: [],
       created_at: "2026-01-01T00:00:00.000Z",
-      created_by_wallet: null,
+      created_by_wallet: "GCREATOR",
+      member_wallets: ["GCREATOR"],
+      accepted_wallets: ["GCREATOR"],
       settled: false,
     }).name).toBe("Weekend");
   });
