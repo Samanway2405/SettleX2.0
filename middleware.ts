@@ -24,19 +24,36 @@ export function middleware(request: NextRequest) {
   const isDev = process.env.NODE_ENV === "development";
   const nonce = btoa(crypto.randomUUID());
 
+  function getOrigin(url?: string): string | undefined {
+    if (!url) return undefined;
+    try {
+      return new URL(url).origin;
+    } catch {
+      return undefined;
+    }
+  }
+
+  const horizonOrigin = getOrigin(process.env.NEXT_PUBLIC_HORIZON_URL);
+  const sorobanOrigin = getOrigin(process.env.NEXT_PUBLIC_SOROBAN_RPC_URL);
+  const supabaseOrigin = getOrigin(process.env.NEXT_PUBLIC_SUPABASE_URL);
+
   // Network origins the app legitimately talks to.
   const connectSrc = [
     "'self'",
-    "https://*.stellar.org", // Horizon (testnet/mainnet) + Soroban RPC
-    "https://*.sorobanrpc.com", // production Soroban RPC providers
-    "https://horizon.stellar.org",
+    horizonOrigin,
+    sorobanOrigin,
+    supabaseOrigin,
+    supabaseOrigin ? supabaseOrigin.replace(/^http/, "ws") : undefined,
     "https://api.stellar.expert",
-    "https://*.supabase.co",
-    "wss://*.supabase.co",
-
+    "https://*.walletconnect.com",
+    "https://*.walletconnect.org",
+    "wss://*.walletconnect.com",
+    "wss://*.walletconnect.org",
+    "https://*.reown.com",
+    "wss://*.reown.com",
     // Dev-only: Next.js HMR websocket + fast-refresh polling.
     ...(isDev ? ["ws://localhost:*", "http://localhost:*"] : []),
-  ].join(" ");
+  ].filter(Boolean).join(" ");
 
   const scriptSrc = isDev
     ? `'self' 'nonce-${nonce}' 'strict-dynamic' 'unsafe-eval' 'unsafe-inline'`
