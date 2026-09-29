@@ -1,89 +1,34 @@
 # Wallet Integration
 
-## As built (works today)
+SettleX uses the maintained
+[`@creit.tech/stellar-wallets-kit`](https://github.com/Creit-Tech/Stellar-Wallets-Kit)
+package for wallet discovery, connection UI, address access, and transaction
+signing.
 
-SettleX connects wallets through `getWalletsKit()` in
-[lib/stellar/walletsKit.ts](../lib/stellar/walletsKit.ts). Supported out of the box:
+The small adapter in
+[`lib/stellar/walletsKit.ts`](../lib/stellar/walletsKit.ts) initializes the kit
+once with its default modules and preserves the app-facing API used by
+`WalletContext` and the transaction helpers. Wallet-specific behavior and the
+accessible connection modal remain owned by the upstream package.
 
-| Wallet | Type | Detection |
-|---|---|---|
-| Freighter | Browser extension | `@stellar/freighter-api` |
-| xBull | Browser extension | `window.xBulls` |
-| Lobstr | Browser extension | `window.lobstr` |
-| Rabet | Browser extension | `window.rabet` |
+The npm distribution is used intentionally, so this project does not need a
+JSR registry override in `.npmrc`.
 
-Connection state lives in [context/WalletContext.tsx](../context/WalletContext.tsx).
-It now:
-- opens the wallet chooser for **any** supported wallet (no longer hard-gated on
-  Freighter), and
-- persists **which** wallet you connected with (`settlex:walletId`) so signing
-  after a page reload targets the correct extension.
+## Default wallet support
 
-## Adding WalletConnect (mobile & "global" wallets like Trust Wallet)
+`defaultModules()` enables the wallets that require no application-specific
+configuration, including Freighter, Albedo, xBull, Lobstr, Rabet, Hana,
+Klever, OneKey, Bitget, Fordefi, Cactus Link, D'CENT, Scopuly, MetaMask Stellar,
+and Ghost.
 
-> **Why this is a separate, deliberate step.** `package.json` pins
-> `@creit-tech/stellar-wallets-kit@^2.0.0-beta.9`, a pre-1.0/beta line whose
-> exported API has been in flux (the classic `new StellarWalletsKit({...})`
-> instance API vs. a newer static `StellarWalletsKit.init({...})` /
-> `createButton` API). Do this after `npm install` so you can confirm the exact
-> API of the version that actually resolves, instead of shipping an import that
-> might not match. Everything else in the product does not depend on it.
+The selected wallet ID is stored under `settlex:walletId`. On reload, SettleX
+selects that module before reconciling the saved account, ensuring subsequent
+signing requests go back to the wallet the user connected.
 
-WalletConnect is what brings in **mobile wallets** (scan-to-connect) — this is the
-realistic path to "use your phone wallet," including Trust Wallet where it exposes
-Stellar over WalletConnect. (MetaMask is EVM-only and reaches Stellar only via the
-third-party [Stellar Snap](https://snaps.metamask.io/snap/npm/stellar-snap/); treat
-it as an optional, clearly-labeled extra, not your primary path.)
 
-### Step 1 — get a project id
-Create a free project at <https://dashboard.reown.com> and set:
-```env
-NEXT_PUBLIC_WC_PROJECT_ID=your-project-id
-```
 
-### Step 2 — confirm the installed kit's API
-```bash
-npm install
-node -e "const k=require('@creit-tech/stellar-wallets-kit'); console.log(Object.keys(k))"
-```
-Note whether it exports `StellarWalletsKit` as an instance class (classic) or a
-static (`init`/`createButton`), and where the WalletConnect module lives
-(commonly `@creit-tech/stellar-wallets-kit/modules/walletconnect.module`).
+## Passkey smart wallets
 
-### Step 3 — wire the module (classic instance API shown)
-In [lib/stellar/walletsKit.ts](../lib/stellar/walletsKit.ts), back `getWalletsKit()`
-with the real kit and register modules, e.g.:
-```ts
-import { StellarWalletsKit, WalletNetwork, allowAllModules } from "@creit-tech/stellar-wallets-kit";
-import { WalletConnectModule, WalletConnectAllowedMethods } from "@creit-tech/stellar-wallets-kit/modules/walletconnect.module";
-
-const modules = [
-  ...allowAllModules(),
-  ...(process.env.NEXT_PUBLIC_WC_PROJECT_ID
-    ? [new WalletConnectModule({
-        projectId: process.env.NEXT_PUBLIC_WC_PROJECT_ID,
-        url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://settlex.app",
-        name: "SettleX",
-        description: "Split & settle expenses on Stellar",
-        icons: ["/pwa-icon?size=512"],
-        method: WalletConnectAllowedMethods.SIGN,
-        network: WalletNetwork.TESTNET,
-      })]
-    : []),
-];
-```
-Keep the existing exported adapter shape (`openModal`, `getAddress`,
-`signTransaction`, `getNetworkFromWallet`) so `WalletContext` and
-[lib/freighter/index.ts](../lib/freighter/index.ts) keep working unchanged.
-
-### Step 4 — verify
-```bash
-npm run build
-npm run dev   # then connect via QR from a phone wallet
-```
-
-## Roadmap: passkey smart wallets (mainstream onboarding)
-For users with no wallet at all, the biggest UX unlock is a passkey-based Soroban
-smart wallet (Face ID / Touch ID, no seed phrase) via
-[passkey-kit](https://github.com/kalepail/passkey-kit). See §7.4 of
-[PRODUCT_CONVERSION_GUIDE.md](./PRODUCT_CONVERSION_GUIDE.md).
+For users without a Stellar wallet, a passkey-based Soroban smart wallet is a
+separate onboarding path. See the product roadmap in
+[`PRODUCT_CONVERSION_GUIDE.md`](./PRODUCT_CONVERSION_GUIDE.md).

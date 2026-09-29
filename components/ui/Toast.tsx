@@ -5,6 +5,7 @@ import React, {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -120,15 +121,33 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => [...prev.slice(-4), { ...opts, id }]); // max 5 at once
   }, []);
 
-  const ctx: ToastContextType = {
-    toast: addToast,
-    success: (title, description) =>
+  const success = useCallback(
+    (title: string, description?: string) =>
       addToast({ variant: "success", title, description }),
-    error: (title, description) =>
+    [addToast]
+  );
+
+  const error = useCallback(
+    (title: string, description?: string) =>
       addToast({ variant: "error", title, description }),
-    info: (title, description) =>
+    [addToast]
+  );
+
+  const info = useCallback(
+    (title: string, description?: string) =>
       addToast({ variant: "info", title, description }),
-  };
+    [addToast]
+  );
+
+  const ctx = useMemo<ToastContextType>(
+    () => ({
+      toast: addToast,
+      success,
+      error,
+      info,
+    }),
+    [addToast, success, error, info]
+  );
 
   return (
     <ToastContext.Provider value={ctx}>

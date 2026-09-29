@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS expenses (
     version BIGINT NOT NULL DEFAULT 1,
     -- New: Track creator and member wallets for authentication
     created_by_wallet TEXT NOT NULL,  -- Stellar address of expense creator
-    member_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]  -- Array of all member wallet addresses
+    member_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], -- Invited wallet addresses
+    accepted_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[] -- Members who explicitly accepted
 );
 
 -- Create trips table
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS trips (
   settled BOOLEAN DEFAULT FALSE NOT NULL,
   -- New: Track creator and member wallets for authentication
   created_by_wallet TEXT NOT NULL,  -- Stellar address of trip creator
-  member_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]  -- Array of all member wallet addresses
+  member_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[], -- Invited wallet addresses
+  accepted_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[] -- Members who explicitly accepted
 );
 
 -- ============================================================================
@@ -90,6 +92,18 @@ BEGIN
     ) THEN
         ALTER TABLE expenses ADD COLUMN version BIGINT NOT NULL DEFAULT 1;
     END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'expenses' AND column_name = 'accepted_wallets'
+    ) THEN
+        ALTER TABLE expenses ADD COLUMN accepted_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+        -- Existing rows were created before consent existed. Keep them visible
+        -- only to their creator until each invited wallet explicitly accepts.
+        UPDATE expenses
+        SET accepted_wallets = ARRAY[created_by_wallet]
+        WHERE created_by_wallet <> '';
+    END IF;
 END $$;
 
 -- Add wallet columns to trips table if they don't exist
@@ -107,6 +121,16 @@ BEGIN
         WHERE table_name = 'trips' AND column_name = 'member_wallets'
     ) THEN
         ALTER TABLE trips ADD COLUMN member_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'trips' AND column_name = 'accepted_wallets'
+    ) THEN
+        ALTER TABLE trips ADD COLUMN accepted_wallets TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+        UPDATE trips
+        SET accepted_wallets = ARRAY[created_by_wallet]
+        WHERE created_by_wallet <> '';
     END IF;
 END $$;
 
@@ -150,6 +174,8 @@ CREATE INDEX IF NOT EXISTS idx_expenses_created_by_wallet ON expenses (created_b
 
 CREATE INDEX IF NOT EXISTS idx_expenses_member_wallets ON expenses USING GIN (member_wallets);
 
+CREATE INDEX IF NOT EXISTS idx_expenses_accepted_wallets ON expenses USING GIN (accepted_wallets);
+
 CREATE INDEX IF NOT EXISTS idx_expenses_created_at ON expenses (created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_expenses_settled ON expenses (settled);
@@ -157,6 +183,8 @@ CREATE INDEX IF NOT EXISTS idx_expenses_settled ON expenses (settled);
 CREATE INDEX IF NOT EXISTS idx_trips_created_by_wallet ON trips (created_by_wallet);
 
 CREATE INDEX IF NOT EXISTS idx_trips_member_wallets ON trips USING GIN (member_wallets);
+
+CREATE INDEX IF NOT EXISTS idx_trips_accepted_wallets ON trips USING GIN (accepted_wallets);
 -- Indexes for trips
 CREATE INDEX IF NOT EXISTS idx_trips_created_at ON trips (created_at DESC);
 
@@ -263,15 +291,15 @@ AS $$
   -- lives here: a revoked token resolves to NULL, and NULL equals nothing, so
   -- it matches no row on any table. Tokens minted before `jti` existed have no
   -- id to deny and stay valid until they expire.
-  SELECT pg_catalog.nullif(
-    pg_catalog.coalesce(
+  SELECT NULLIF(
+    COALESCE(
       CASE
         WHEN public.settlex_token_revoked(
-          pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'jti',
-          pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'wallet_address',
-          (pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'iat')::BIGINT
+          NULLIF(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'jti',
+          NULLIF(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'wallet_address',
+          (NULLIF(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'iat')::BIGINT
         ) THEN ''
-        ELSE pg_catalog.nullif(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'wallet_address'
+        ELSE NULLIF(pg_catalog.current_setting('request.jwt.claims', true), '')::jsonb ->> 'wallet_address'
       END,
       ''
     ),
@@ -417,29 +445,21 @@ SELECT USING (
     -- 1. Caller viewing their own profile
     wallet_address = public.settlex_wallet()
     OR
-    -- 2. Caller shares an expense with this user (both appear in member_wallets or shares)
+    -- 2. Caller and counterparty both accepted the same expense
     EXISTS (
         SELECT 1 FROM public.expenses e
-        WHERE (
-            public.settlex_wallet() = ANY(e.member_wallets)
-            OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(e.shares) AS s1
-                WHERE s1->>'walletAddress' = public.settlex_wallet()
-            )
-        )
-        AND (
-            users.wallet_address = ANY(e.member_wallets)
-            OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(e.shares) AS s2
-                WHERE s2->>'walletAddress' = users.wallet_address
-            )
-        )
+        WHERE public.settlex_wallet() = ANY(e.accepted_wallets)
+          AND users.wallet_address = ANY(e.accepted_wallets)
+          AND public.settlex_wallet() = ANY(e.member_wallets)
+          AND users.wallet_address = ANY(e.member_wallets)
     )
     OR
-    -- 3. Caller shares a trip with this user
+    -- 3. Caller and counterparty both accepted the same trip
     EXISTS (
         SELECT 1 FROM public.trips t
-        WHERE public.settlex_wallet() = ANY(t.member_wallets)
+        WHERE public.settlex_wallet() = ANY(t.accepted_wallets)
+          AND users.wallet_address = ANY(t.accepted_wallets)
+          AND public.settlex_wallet() = ANY(t.member_wallets)
           AND users.wallet_address = ANY(t.member_wallets)
     )
 );
@@ -463,16 +483,15 @@ WITH CHECK (
 
 -- EXPENSES POLICIES --
 
--- Members can view expenses they're part of
--- Also allows any wallet that appears on a share (covers trip members who
--- were added without a wallet address at trip creation time)
+-- Creators can always view their rows. Other invitees see an expense only
+-- after explicitly accepting it; merely naming a public wallet is not consent.
 CREATE POLICY "Members can view their expenses" ON expenses
 FOR SELECT
 USING (
-    public.settlex_wallet() = ANY(member_wallets)
-    OR EXISTS (
-        SELECT 1 FROM jsonb_array_elements(shares) AS s
-        WHERE s->>'walletAddress' = public.settlex_wallet()
+    created_by_wallet = public.settlex_wallet()
+    OR (
+        public.settlex_wallet() = ANY(member_wallets)
+        AND public.settlex_wallet() = ANY(accepted_wallets)
     )
 );
 
@@ -485,25 +504,26 @@ WITH CHECK (
     AND
     -- Creator must be in the members list
     created_by_wallet = ANY(member_wallets)
+    AND accepted_wallets = ARRAY[created_by_wallet]
+    AND settled = false
 );
 
--- Members can update expenses they're part of
--- Also allows any wallet that appears on a share (even if not in member_wallets)
--- so members can record their own payment regardless of how the expense was created
+-- Accepted members may update only the narrow fields allowed by the validation
+-- trigger. Pending invitees cannot read or update the row.
 CREATE POLICY "Members can update their expenses" ON expenses
 FOR UPDATE
 USING (
-    public.settlex_wallet() = ANY(member_wallets)
-    OR EXISTS (
-        SELECT 1 FROM jsonb_array_elements(shares) AS s
-        WHERE s->>'walletAddress' = public.settlex_wallet()
+    created_by_wallet = public.settlex_wallet()
+    OR (
+        public.settlex_wallet() = ANY(member_wallets)
+        AND public.settlex_wallet() = ANY(accepted_wallets)
     )
 )
 WITH CHECK (
-    public.settlex_wallet() = ANY(member_wallets)
-    OR EXISTS (
-        SELECT 1 FROM jsonb_array_elements(shares) AS s
-        WHERE s->>'walletAddress' = public.settlex_wallet()
+    created_by_wallet = public.settlex_wallet()
+    OR (
+        public.settlex_wallet() = ANY(member_wallets)
+        AND public.settlex_wallet() = ANY(accepted_wallets)
     )
 );
 
@@ -516,11 +536,15 @@ USING (
 
 -- TRIPS POLICIES --
 
--- Members can view trips they're part of
+-- Pending trip invitations are exposed only through get_pending_invitations().
 CREATE POLICY "Members can view their trips" ON trips
 FOR SELECT
 USING (
-    public.settlex_wallet() = ANY(member_wallets)
+    created_by_wallet = public.settlex_wallet()
+    OR (
+        public.settlex_wallet() = ANY(member_wallets)
+        AND public.settlex_wallet() = ANY(accepted_wallets)
+    )
 );
 
 -- Any authenticated wallet can create a trip
@@ -530,16 +554,26 @@ WITH CHECK (
     created_by_wallet = public.settlex_wallet()
     AND
     created_by_wallet = ANY(member_wallets)
+    AND accepted_wallets = ARRAY[created_by_wallet]
+    AND settled = false
 );
 
 -- Members can update trips they're part of
 CREATE POLICY "Members can update their trips" ON trips
 FOR UPDATE
 USING (
-    public.settlex_wallet() = ANY(member_wallets)
+    created_by_wallet = public.settlex_wallet()
+    OR (
+        public.settlex_wallet() = ANY(member_wallets)
+        AND public.settlex_wallet() = ANY(accepted_wallets)
+    )
 )
 WITH CHECK (
-    public.settlex_wallet() = ANY(member_wallets)
+    created_by_wallet = public.settlex_wallet()
+    OR (
+        public.settlex_wallet() = ANY(member_wallets)
+        AND public.settlex_wallet() = ANY(accepted_wallets)
+    )
 );
 
 -- Only the creator can delete a trip
@@ -645,7 +679,7 @@ BEGIN
   -- invalidate another editor's token for nothing.
   IF NEW IS DISTINCT FROM OLD THEN
     IF NEW.version IS NOT DISTINCT FROM OLD.version THEN
-      NEW.version = pg_catalog.coalesce(OLD.version, 0) + 1;
+      NEW.version = COALESCE(OLD.version, 0) + 1;
     END IF;
   END IF;
   RETURN NEW;
@@ -680,6 +714,313 @@ EXECUTE FUNCTION update_updated_at_column();
 -- 4. Trips cannot be reopened, have expenses removed, or have metadata altered
 --    by non-creators.
 -- ============================================================================
+
+-- Validate the complete expense payload at the database boundary. Shares store
+-- debts owed by non-payers; the payer's allocation is intentionally implicit.
+-- The weighted calculation below therefore verifies every stored share against
+-- the same exact-stroop allocation used by the client, which also proves that
+-- stored shares plus the payer's allocation reconcile to total_amount.
+CREATE OR REPLACE FUNCTION public.assert_valid_expense_payload(
+    p_total_amount TEXT,
+    p_currency TEXT,
+    p_split_mode TEXT,
+    p_paid_by_member_id TEXT,
+    p_members JSONB,
+    p_shares JSONB,
+    p_created_by_wallet TEXT,
+    p_member_wallets TEXT[]
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+DECLARE
+    v_total_stroops BIGINT;
+    v_member_count INTEGER;
+    v_expected_wallets TEXT[];
+BEGIN
+    IF p_currency <> 'XLM' OR p_split_mode NOT IN ('equal', 'custom') THEN
+        RAISE EXCEPTION 'Invalid expense currency or split mode';
+    END IF;
+
+    IF p_total_amount IS NULL
+       OR NOT (p_total_amount ~ '^(0|[1-9][0-9]*)(\.[0-9]{1,7})?$')
+       OR p_total_amount::NUMERIC <= 0
+       OR p_total_amount::NUMERIC > 100000000 THEN
+        RAISE EXCEPTION 'total_amount must be a positive XLM amount with at most 7 decimals';
+    END IF;
+    v_total_stroops := (p_total_amount::NUMERIC * 10000000)::BIGINT;
+
+    IF pg_catalog.jsonb_typeof(p_members) <> 'array'
+       OR pg_catalog.jsonb_typeof(p_shares) <> 'array' THEN
+        RAISE EXCEPTION 'members and shares must be JSON arrays';
+    END IF;
+
+    v_member_count := pg_catalog.jsonb_array_length(p_members);
+    IF v_member_count < 2 THEN
+        RAISE EXCEPTION 'An expense requires at least two members';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(p_members) AS m
+        WHERE COALESCE(m->>'id', '') = ''
+           OR COALESCE(m->>'name', '') = ''
+           OR COALESCE(m->>'walletAddress', '') !~ '^G[A-Z2-7]{55}$'
+    ) OR (
+        SELECT pg_catalog.count(*) <> pg_catalog.count(DISTINCT m->>'id')
+        FROM pg_catalog.jsonb_array_elements(p_members) AS m
+    ) OR (
+        SELECT pg_catalog.count(*) <> pg_catalog.count(DISTINCT m->>'walletAddress')
+        FROM pg_catalog.jsonb_array_elements(p_members) AS m
+    ) THEN
+        RAISE EXCEPTION 'Expense members require unique ids, names, and valid Stellar wallets';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(p_members) AS m
+        WHERE m->>'walletAddress' = p_created_by_wallet
+    ) THEN
+        RAISE EXCEPTION 'The authenticated creator must be an expense member';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(p_members) AS m
+        WHERE m->>'id' = p_paid_by_member_id
+    ) THEN
+        RAISE EXCEPTION 'The expense payer must be a member';
+    END IF;
+
+    SELECT COALESCE(
+        pg_catalog.array_agg(wallet ORDER BY wallet),
+        ARRAY[]::TEXT[]
+    )
+    INTO v_expected_wallets
+    FROM (
+        SELECT DISTINCT m->>'walletAddress' AS wallet
+        FROM pg_catalog.jsonb_array_elements(p_members) AS m
+    ) AS wallets;
+
+    IF p_member_wallets IS NULL
+       OR pg_catalog.cardinality(p_member_wallets) <> pg_catalog.cardinality(v_expected_wallets)
+       OR NOT (p_member_wallets @> v_expected_wallets AND v_expected_wallets @> p_member_wallets) THEN
+        RAISE EXCEPTION 'member_wallets must exactly match expense members';
+    END IF;
+
+    IF pg_catalog.jsonb_array_length(p_shares) <> v_member_count - 1 THEN
+        RAISE EXCEPTION 'Every non-payer must have exactly one expense share';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(p_shares) AS s
+        WHERE COALESCE(s->>'memberId', '') = ''
+           OR COALESCE(s->>'name', '') = ''
+           OR s->>'memberId' = p_paid_by_member_id
+           OR NOT (s ? 'paid')
+           OR pg_catalog.jsonb_typeof(s->'paid') <> 'boolean'
+           OR (s->>'paid')::BOOLEAN
+           OR NULLIF(s->>'txHash', '') IS NOT NULL
+           OR COALESCE(s->>'amount', '') !~ '^(0|[1-9][0-9]*)(\.[0-9]{1,7})?$'
+           OR NOT EXISTS (
+                SELECT 1
+                FROM pg_catalog.jsonb_array_elements(p_members) AS m
+                WHERE m->>'id' = s->>'memberId'
+                  AND m->>'name' = s->>'name'
+                  AND m->>'walletAddress' = s->>'walletAddress'
+           )
+    ) OR (
+        SELECT pg_catalog.count(*) <> pg_catalog.count(DISTINCT s->>'memberId')
+        FROM pg_catalog.jsonb_array_elements(p_shares) AS s
+    ) THEN
+        RAISE EXCEPTION 'Shares must be unique, unpaid, transaction-free, and match non-payer members';
+    END IF;
+
+    IF p_split_mode = 'custom' AND EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(p_members) AS m
+        WHERE COALESCE(m->>'weight', '') !~ '^[1-9][0-9]{0,2}$'
+           OR (m->>'weight')::INTEGER > 1000
+    ) THEN
+        RAISE EXCEPTION 'Custom split weights must be integers from 1 to 1000';
+    END IF;
+
+    IF EXISTS (
+        WITH member_weights AS (
+            SELECT
+                m,
+                ordinality,
+                CASE
+                    WHEN p_split_mode = 'custom' THEN (m->>'weight')::BIGINT
+                    ELSE 1::BIGINT
+                END AS weight
+            FROM pg_catalog.jsonb_array_elements(p_members) WITH ORDINALITY AS members(m, ordinality)
+        ),
+        allocations AS (
+            SELECT
+                m,
+                ordinality,
+                weight,
+                pg_catalog.sum(weight) OVER () AS total_weight
+            FROM member_weights
+        ),
+        bases AS (
+            SELECT
+                m,
+                ordinality,
+                (v_total_stroops * weight) / total_weight AS base_stroops,
+                (v_total_stroops * weight) % total_weight AS remainder
+            FROM allocations
+        ),
+        ranked AS (
+            SELECT
+                m,
+                base_stroops,
+                pg_catalog.row_number() OVER (ORDER BY remainder DESC, ordinality) AS remainder_rank,
+                v_total_stroops - pg_catalog.sum(base_stroops) OVER () AS leftover
+            FROM bases
+        )
+        SELECT 1
+        FROM ranked AS expected
+        JOIN LATERAL (
+            SELECT s
+            FROM pg_catalog.jsonb_array_elements(p_shares) AS s
+            WHERE s->>'memberId' = expected.m->>'id'
+        ) AS actual ON true
+        WHERE expected.m->>'id' <> p_paid_by_member_id
+          AND ((actual.s->>'amount')::NUMERIC * 10000000)::BIGINT
+              <> expected.base_stroops
+                 + CASE WHEN expected.remainder_rank <= expected.leftover THEN 1 ELSE 0 END
+    ) THEN
+        RAISE EXCEPTION 'Share amounts do not reconcile to total_amount';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.validate_expense_insert()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_caller TEXT;
+BEGIN
+    v_caller := public.settlex_wallet();
+    IF v_caller IS NULL THEN
+        IF COALESCE(pg_catalog.current_setting('request.jwt.claims', true), '') <> '' THEN
+            RAISE EXCEPTION 'Unauthorized: invalid or missing wallet session';
+        END IF;
+    ELSIF NEW.created_by_wallet <> v_caller THEN
+        RAISE EXCEPTION 'created_by_wallet must match the authenticated wallet';
+    END IF;
+
+    IF NEW.settled OR NEW.version <> 1 THEN
+        RAISE EXCEPTION 'New expenses must be unsettled at version 1';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.unnest(NEW.accepted_wallets) AS wallet
+        WHERE wallet <> NEW.created_by_wallet
+    ) THEN
+        RAISE EXCEPTION 'Invited wallets must accept the expense themselves';
+    END IF;
+
+    PERFORM public.assert_valid_expense_payload(
+        NEW.total_amount,
+        NEW.currency,
+        NEW.split_mode,
+        NEW.paid_by_member_id,
+        NEW.members,
+        NEW.shares,
+        NEW.created_by_wallet,
+        NEW.member_wallets
+    );
+
+    NEW.accepted_wallets := ARRAY[NEW.created_by_wallet];
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.validate_trip_insert()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_caller TEXT;
+    v_expected_wallets TEXT[];
+BEGIN
+    v_caller := public.settlex_wallet();
+    IF v_caller IS NULL THEN
+        IF COALESCE(pg_catalog.current_setting('request.jwt.claims', true), '') <> '' THEN
+            RAISE EXCEPTION 'Unauthorized: invalid or missing wallet session';
+        END IF;
+    ELSIF NEW.created_by_wallet <> v_caller THEN
+        RAISE EXCEPTION 'created_by_wallet must match the authenticated wallet';
+    END IF;
+
+    IF NEW.settled OR pg_catalog.cardinality(NEW.expense_ids) <> 0 THEN
+        RAISE EXCEPTION 'New trips must be unsettled and contain no expenses';
+    END IF;
+    IF pg_catalog.jsonb_typeof(NEW.members) <> 'array'
+       OR pg_catalog.jsonb_array_length(NEW.members) < 2 THEN
+        RAISE EXCEPTION 'A trip requires at least two members';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(NEW.members) AS m
+        WHERE COALESCE(m->>'id', '') = ''
+           OR COALESCE(m->>'name', '') = ''
+           OR COALESCE(m->>'walletAddress', '') !~ '^G[A-Z2-7]{55}$'
+    ) OR (
+        SELECT pg_catalog.count(*) <> pg_catalog.count(DISTINCT m->>'id')
+        FROM pg_catalog.jsonb_array_elements(NEW.members) AS m
+    ) OR (
+        SELECT pg_catalog.count(*) <> pg_catalog.count(DISTINCT m->>'walletAddress')
+        FROM pg_catalog.jsonb_array_elements(NEW.members) AS m
+    ) THEN
+        RAISE EXCEPTION 'Trip members require unique ids, names, and valid Stellar wallets';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(NEW.members) AS m
+        WHERE m->>'walletAddress' = NEW.created_by_wallet
+    ) THEN
+        RAISE EXCEPTION 'Trip creator must be a trip member';
+    END IF;
+
+    SELECT COALESCE(
+        pg_catalog.array_agg(wallet ORDER BY wallet),
+        ARRAY[]::TEXT[]
+    )
+    INTO v_expected_wallets
+    FROM (
+        SELECT DISTINCT m->>'walletAddress' AS wallet
+        FROM pg_catalog.jsonb_array_elements(NEW.members) AS m
+    ) AS wallets;
+
+    IF NEW.member_wallets IS NULL
+       OR pg_catalog.cardinality(NEW.member_wallets) <> pg_catalog.cardinality(v_expected_wallets)
+       OR NOT (NEW.member_wallets @> v_expected_wallets AND v_expected_wallets @> NEW.member_wallets) THEN
+        RAISE EXCEPTION 'member_wallets must exactly match trip members';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.unnest(NEW.accepted_wallets) AS wallet
+        WHERE wallet <> NEW.created_by_wallet
+    ) THEN
+        RAISE EXCEPTION 'Invited wallets must accept the trip themselves';
+    END IF;
+
+    NEW.accepted_wallets := ARRAY[NEW.created_by_wallet];
+    RETURN NEW;
+END;
+$$;
 
 -- Trigger function for column-level validation and authorization on expenses
 CREATE OR REPLACE FUNCTION public.validate_expense_update()
@@ -725,6 +1066,36 @@ BEGIN
     END IF;
 
     v_is_creator := (v_caller = OLD.created_by_wallet);
+
+    -- Acceptance is an append-only, self-service transition. The RPC below is
+    -- SECURITY DEFINER so a pending invitee can accept without first receiving
+    -- SELECT/UPDATE access to the expense row.
+    IF NEW.accepted_wallets IS DISTINCT FROM OLD.accepted_wallets THEN
+        IF v_is_creator
+           OR NOT (v_caller = ANY(OLD.member_wallets))
+           OR v_caller = ANY(OLD.accepted_wallets)
+           OR NOT (OLD.accepted_wallets <@ NEW.accepted_wallets)
+           OR pg_catalog.cardinality(NEW.accepted_wallets) <> pg_catalog.cardinality(OLD.accepted_wallets) + 1
+           OR NOT (v_caller = ANY(NEW.accepted_wallets)) THEN
+            RAISE EXCEPTION 'A wallet may only accept its own pending expense invitation';
+        END IF;
+
+        IF NEW.title IS DISTINCT FROM OLD.title
+           OR NEW.description IS DISTINCT FROM OLD.description
+           OR NEW.total_amount IS DISTINCT FROM OLD.total_amount
+           OR NEW.currency IS DISTINCT FROM OLD.currency
+           OR NEW.split_mode IS DISTINCT FROM OLD.split_mode
+           OR NEW.paid_by_member_id IS DISTINCT FROM OLD.paid_by_member_id
+           OR NEW.members IS DISTINCT FROM OLD.members
+           OR NEW.shares IS DISTINCT FROM OLD.shares
+           OR NEW.created_at IS DISTINCT FROM OLD.created_at
+           OR NEW.settled IS DISTINCT FROM OLD.settled
+           OR NEW.created_by_wallet IS DISTINCT FROM OLD.created_by_wallet
+           OR NEW.member_wallets IS DISTINCT FROM OLD.member_wallets THEN
+            RAISE EXCEPTION 'Accepting an invitation cannot modify the expense';
+        END IF;
+        RETURN NEW;
+    END IF;
 
     -- 2. Creator validations
     IF v_is_creator THEN
@@ -812,8 +1183,15 @@ BEGIN
                 END IF;
 
                 IF COALESCE((v_new_share->>'paid')::boolean, false) = true THEN
-                    IF v_new_share->>'txHash' IS NULL OR trim(v_new_share->>'txHash') = '' THEN
+                    IF v_new_share->>'txHash' IS NULL OR NOT (v_new_share->>'txHash' ~ '^[0-9a-f]{64}$') THEN
                         RAISE EXCEPTION 'Valid transaction hash is required when marking share as paid';
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(NEW.shares) AS s
+                        WHERE s->>'memberId' != v_new_share->>'memberId'
+                        AND s->>'txHash' = v_new_share->>'txHash'
+                    ) THEN
+                        RAISE EXCEPTION 'Transaction hash already used on another share';
                     END IF;
                 END IF;
             END IF;
@@ -881,6 +1259,29 @@ BEGIN
     END IF;
 
     v_is_creator := (v_caller = OLD.created_by_wallet);
+
+    IF NEW.accepted_wallets IS DISTINCT FROM OLD.accepted_wallets THEN
+        IF v_is_creator
+           OR NOT (v_caller = ANY(OLD.member_wallets))
+           OR v_caller = ANY(OLD.accepted_wallets)
+           OR NOT (OLD.accepted_wallets <@ NEW.accepted_wallets)
+           OR pg_catalog.cardinality(NEW.accepted_wallets) <> pg_catalog.cardinality(OLD.accepted_wallets) + 1
+           OR NOT (v_caller = ANY(NEW.accepted_wallets)) THEN
+            RAISE EXCEPTION 'A wallet may only accept its own pending trip invitation';
+        END IF;
+
+        IF NEW.name IS DISTINCT FROM OLD.name
+           OR NEW.description IS DISTINCT FROM OLD.description
+           OR NEW.members IS DISTINCT FROM OLD.members
+           OR NEW.expense_ids IS DISTINCT FROM OLD.expense_ids
+           OR NEW.created_at IS DISTINCT FROM OLD.created_at
+           OR NEW.settled IS DISTINCT FROM OLD.settled
+           OR NEW.created_by_wallet IS DISTINCT FROM OLD.created_by_wallet
+           OR NEW.member_wallets IS DISTINCT FROM OLD.member_wallets THEN
+            RAISE EXCEPTION 'Accepting an invitation cannot modify the trip';
+        END IF;
+        RETURN NEW;
+    END IF;
 
     -- 2. Creator validations
     IF v_is_creator THEN
@@ -972,7 +1373,9 @@ $$;
 
 -- Drop existing validation triggers if they exist
 DROP TRIGGER IF EXISTS validate_users_update ON users;
+DROP TRIGGER IF EXISTS validate_expenses_insert ON expenses;
 DROP TRIGGER IF EXISTS validate_expenses_update ON expenses;
+DROP TRIGGER IF EXISTS validate_trips_insert ON trips;
 DROP TRIGGER IF EXISTS validate_trips_update ON trips;
 
 -- Create validation triggers
@@ -986,10 +1389,117 @@ BEFORE UPDATE ON expenses
 FOR EACH ROW
 EXECUTE FUNCTION validate_expense_update();
 
+CREATE TRIGGER validate_expenses_insert
+BEFORE INSERT ON expenses
+FOR EACH ROW
+EXECUTE FUNCTION validate_expense_insert();
+
 CREATE TRIGGER validate_trips_update
 BEFORE UPDATE ON trips
 FOR EACH ROW
 EXECUTE FUNCTION validate_trip_update();
+
+CREATE TRIGGER validate_trips_insert
+BEFORE INSERT ON trips
+FOR EACH ROW
+EXECUTE FUNCTION validate_trip_insert();
+
+-- Pending invitees cannot SELECT the underlying row. This deliberately narrow
+-- RPC exposes only the information needed to make an informed consent choice.
+CREATE OR REPLACE FUNCTION public.get_pending_invitations()
+RETURNS TABLE (
+    entity_type TEXT,
+    entity_id UUID,
+    title TEXT,
+    created_by_wallet TEXT,
+    created_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_caller TEXT;
+BEGIN
+    v_caller := public.settlex_wallet();
+    IF v_caller IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated';
+    END IF;
+
+    RETURN QUERY
+    SELECT
+        'expense'::TEXT,
+        e.id,
+        e.title,
+        e.created_by_wallet,
+        e.created_at
+    FROM public.expenses AS e
+    WHERE v_caller = ANY(e.member_wallets)
+      AND NOT (v_caller = ANY(e.accepted_wallets))
+      AND v_caller <> e.created_by_wallet
+    UNION ALL
+    SELECT
+        'trip'::TEXT,
+        t.id,
+        t.name,
+        t.created_by_wallet,
+        t.created_at
+    FROM public.trips AS t
+    WHERE v_caller = ANY(t.member_wallets)
+      AND NOT (v_caller = ANY(t.accepted_wallets))
+      AND v_caller <> t.created_by_wallet
+    ORDER BY created_at DESC;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.accept_invitation(
+    p_entity_type TEXT,
+    p_entity_id UUID
+)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_caller TEXT;
+    v_updated_id UUID;
+BEGIN
+    v_caller := public.settlex_wallet();
+    IF v_caller IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated';
+    END IF;
+
+    IF p_entity_type = 'expense' THEN
+        UPDATE public.expenses
+        SET accepted_wallets = pg_catalog.array_append(accepted_wallets, v_caller)
+        WHERE id = p_entity_id
+          AND v_caller = ANY(member_wallets)
+          AND NOT (v_caller = ANY(accepted_wallets))
+          AND v_caller <> created_by_wallet
+        RETURNING id INTO v_updated_id;
+    ELSIF p_entity_type = 'trip' THEN
+        UPDATE public.trips
+        SET accepted_wallets = pg_catalog.array_append(accepted_wallets, v_caller)
+        WHERE id = p_entity_id
+          AND v_caller = ANY(member_wallets)
+          AND NOT (v_caller = ANY(accepted_wallets))
+          AND v_caller <> created_by_wallet
+        RETURNING id INTO v_updated_id;
+    ELSE
+        RAISE EXCEPTION 'Unknown invitation type';
+    END IF;
+
+    IF v_updated_id IS NULL THEN
+        RAISE EXCEPTION 'Pending invitation not found';
+    END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_pending_invitations() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.accept_invitation(TEXT, UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_pending_invitations() TO authenticated, anon;
+GRANT EXECUTE ON FUNCTION public.accept_invitation(TEXT, UUID) TO authenticated, anon;
 
 -- ============================================================================
 -- 5.6. ATOMIC RPC FUNCTION FOR MARKING SHARES PAID (Concurrency-Safe & Authenticated)
@@ -1012,6 +1522,7 @@ DECLARE
     v_creator_wallet TEXT;
     v_current_shares JSONB;
     v_current_members JSONB;
+    v_accepted_wallets TEXT[];
     v_updated_shares JSONB;
     v_settled BOOLEAN;
     v_target_wallet TEXT;
@@ -1024,19 +1535,32 @@ BEGIN
         RAISE EXCEPTION 'Not authenticated';
     END IF;
 
-    IF p_tx_hash IS NULL OR trim(p_tx_hash) = '' THEN
+    IF p_tx_hash IS NULL OR NOT (p_tx_hash ~ '^[0-9a-f]{64}$') THEN
         RAISE EXCEPTION 'Valid transaction hash is required to mark a share as paid';
     END IF;
 
     -- Lock the expense row for update to eliminate race conditions
-    SELECT shares, members, created_by_wallet 
-    INTO v_current_shares, v_current_members, v_creator_wallet
+    SELECT shares, members, created_by_wallet, accepted_wallets
+    INTO v_current_shares, v_current_members, v_creator_wallet, v_accepted_wallets
     FROM public.expenses
     WHERE id = p_expense_id
     FOR UPDATE;
 
     IF v_current_shares IS NULL THEN
         RAISE EXCEPTION 'Expense not found';
+    END IF;
+
+    IF v_caller_wallet <> v_creator_wallet
+       AND NOT (v_caller_wallet = ANY(v_accepted_wallets)) THEN
+        RAISE EXCEPTION 'Accept the expense invitation before recording a payment';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM jsonb_array_elements(v_current_shares) AS s
+        WHERE s->>'memberId' != p_member_id
+        AND s->>'txHash' = p_tx_hash
+    ) THEN
+        RAISE EXCEPTION 'Transaction hash already used on another share';
     END IF;
 
     -- Caller must be either the expense creator OR the owner of this share
@@ -1094,7 +1618,7 @@ BEGIN
         pg_catalog.bool_and(
             CASE 
                 WHEN elem->>'memberId' = p_member_id THEN true
-                ELSE pg_catalog.coalesce((elem->>'paid')::boolean, false)
+                ELSE COALESCE((elem->>'paid')::boolean, false)
             END
         )
     INTO v_updated_shares, v_settled
@@ -1104,8 +1628,8 @@ BEGIN
     UPDATE public.expenses
     SET 
         shares = v_updated_shares,
-        settled = pg_catalog.coalesce(v_settled, false),
-        version = pg_catalog.coalesce(version, 0) + 1,
+        settled = COALESCE(v_settled, false),
+        version = COALESCE(version, 0) + 1,
         updated_at = pg_catalog.now()
     WHERE id = p_expense_id
     RETURNING *;
@@ -1184,7 +1708,7 @@ REVOKE ALL ON public.auth_rate_limits FROM anon, authenticated;
 -- concurrent verifies of the same challenge cannot both win.
 CREATE OR REPLACE FUNCTION public.auth_consume_nonce (p_nonce TEXT, p_expires_at TIMESTAMPTZ) RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER
 SET
-    search_path = public AS $
+    search_path = public AS $$
 DECLARE
     v_inserted INTEGER;
 BEGIN
@@ -1197,7 +1721,7 @@ BEGIN
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
     RETURN v_inserted > 0;
 END;
-$;
+$$;
 
 -- Fixed-window counter shared by every instance. One statement does the read,
 -- the increment and the window roll-over, so concurrent callers cannot both
@@ -1208,7 +1732,7 @@ CREATE OR REPLACE FUNCTION public.auth_rate_limit (
     p_window_ms INTEGER
 ) RETURNS TABLE (allowed BOOLEAN, retry_after INTEGER) LANGUAGE plpgsql SECURITY DEFINER
 SET
-    search_path = public AS $
+    search_path = public AS $$
 DECLARE
     v_window INTERVAL := (p_window_ms || ' milliseconds')::INTERVAL;
     v_hits INTEGER;
@@ -1229,7 +1753,7 @@ BEGIN
         RETURN QUERY SELECT TRUE, 0;
     END IF;
 END;
-$;
+$$;
 
 -- Only the server (service role) may call these.
 REVOKE ALL ON FUNCTION public.auth_consume_nonce (TEXT, TIMESTAMPTZ)
@@ -1284,4 +1808,3 @@ SELECT tablename, policyname
 FROM pg_policies
 WHERE
     tablename IN ('users', 'expenses', 'trips');
-

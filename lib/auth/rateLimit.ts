@@ -12,6 +12,7 @@
  * deployment.
  */
 import { isSharedStoreConfigured, rateLimitShared } from "@/lib/auth/sharedStore";
+import { reportError } from "@/lib/observability/logger";
 
 interface Window {
   count: number;
@@ -71,7 +72,11 @@ export async function enforceRateLimit(
     try {
       return await rateLimitShared(key, limit, windowMs);
     } catch (err) {
-      console.error("Shared rate limit unavailable, falling back to in-memory:", err);
+      // Reported, not printed: the fallback silently weakens the limit to
+      // per-instance, so the real rate limit becomes limit × instance count.
+      reportError("auth.shared_rate_limit_unavailable", err, {
+        fields: { fallback: "in_memory" },
+      });
     }
   }
   return rateLimit(key, limit, windowMs);

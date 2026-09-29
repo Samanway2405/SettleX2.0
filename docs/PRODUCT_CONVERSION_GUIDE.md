@@ -44,7 +44,7 @@
 |---|-----|----------------|----------|
 | G1 | **Everything runs on Testnet.** No real value ever moves. The whole app is a rehearsal. | [lib/utils/constants.ts](../lib/utils/constants.ts) defaults to `TESTNET` | 🔴 Blocker for "product" |
 | G2 | **The "settlement pool" is an accounting illusion.** Pool credits are internal bookkeeping, *not* custody of real tokens, and `record_payment` **does not verify** the Horizon `tx_hash` it stores. | [docs/ARCHITECTURE_AND_LIMITATIONS.md](./ARCHITECTURE_AND_LIMITATIONS.md) lines 27–28; [contract/src/lib.rs:154](../contract/src/lib.rs#L154) | 🔴 Trust-critical |
-| G3 | **Only 3 extension wallets, via a hand-rolled kit.** [lib/stellar/walletsKit.ts](../lib/stellar/walletsKit.ts) reimplements wallet plumbing even though the real `@creit.tech/stellar-wallets-kit` is *already a dependency* in [package.json](../package.json). No mobile wallets, no WalletConnect, no hardware, no passkeys. | `walletsKit.ts` | 🟠 High |
+| G3 | **WalletConnect and passkey onboarding still need product-specific configuration.** The maintained Stellar Wallets Kit now supplies the default wallet modules and connection modal, but WalletConnect still needs Reown metadata and passkeys remain a separate roadmap item. | `walletsKit.ts` | 🟡 Medium |
 | G4 | **Not actually installable / not a PWA.** No `manifest.webmanifest`, no service worker, only a single `icon.svg`. `metadataBase` points at `https://settlex.app` and references `/og-image.png` which **does not exist** in [public/](../public/). | [app/layout.tsx:38](../app/layout.tsx#L38), [public/](../public/) | 🟠 High |
 | G4b | **Broken referenced files.** The README links to `docs/QUICKSTART.md`, `docs/SUPABASE_SETUP.md`, `docs/AUTHENTICATION_SETUP.md`, `docs/MANUAL_TESTING_GUIDE.md` — none exist in [docs/](.). The OG image is also missing. Broken links read as "unfinished" to any serious evaluator. | README vs. actual `docs/` | 🟡 Medium |
 | G5 | **"Bill pay" is really "send a share to a friend's wallet."** There is no biller network, no fiat rail, no stablecoin. Calling it bill-pay overstates it. | Product framing | 🟠 High (honesty) |
@@ -274,25 +274,20 @@ You asked for "global wallets like Trust Wallet, MetaMask." Here is the truth, b
 
 That doesn't mean you're stuck with 3 wallets. Here's how you actually get broad, "global" wallet coverage on Stellar:
 
-### 7.1 Adopt the real Stellar Wallets Kit (you already installed it)
-[package.json](../package.json) already depends on `@creit.tech/stellar-wallets-kit`, but the code uses a **custom hand-rolled** [lib/stellar/walletsKit.ts](../lib/stellar/walletsKit.ts) that only wires Freighter, xBull, and Lobstr. Switching to the real kit is the single highest-leverage wallet change. The maintained kit supports (2026): **Freighter, xBull (extension + PWA), Albedo, Lobstr, Rabet, Hana, WalletConnect, Ledger, Trezor, HOT Wallet, Klever, OneKey, Bitget.** ([Stellar Wallets Kit](https://github.com/Creit-Tech/Stellar-Wallets-Kit).)
+### 7.1 Maintained Stellar Wallets Kit (implemented)
+[lib/stellar/walletsKit.ts](../lib/stellar/walletsKit.ts) now delegates wallet discovery, connection UI, address access, and signing to `@creit.tech/stellar-wallets-kit`. The adapter keeps the existing application-facing API while `defaultModules()` provides the wallets that require no application-specific configuration.
 
 ```ts
-import {
-  StellarWalletsKit, WalletNetwork, allowAllModules, FREIGHTER_ID,
-} from "@creit.tech/stellar-wallets-kit";
+import { StellarWalletsKit } from "@creit.tech/stellar-wallets-kit/sdk";
+import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils";
+import { Networks } from "@creit.tech/stellar-wallets-kit/types";
 
-export const kit = new StellarWalletsKit({
-  network: process.env.NEXT_PUBLIC_STELLAR_NETWORK === "PUBLIC"
-    ? WalletNetwork.PUBLIC : WalletNetwork.TESTNET,
-  selectedWalletId: FREIGHTER_ID,
-  modules: allowAllModules(), // or a curated subset
+StellarWalletsKit.init({
+  network: Networks.TESTNET,
+  modules: defaultModules(),
 });
-// kit.openModal({ onWalletSelected: async (o) => kit.setWallet(o.id) })
-// const { address } = await kit.getAddress();
-// const { signedTxXdr } = await kit.signTransaction(xdr, { address, networkPassphrase });
 ```
-This is a near drop-in for your current `getWalletsKit()` API (`getAddress`, `signTransaction`, `openModal`) in [hooks/useWallet.ts](../hooks/useWallet.ts) — you designed your custom class to mirror it, which makes the migration mostly deletion. **Net effect: you delete ~400 lines of fragile code and gain WalletConnect + hardware + many wallets.**
+The remaining wallet work is configuration rather than maintaining parallel wallet implementations.
 
 ### 7.2 WalletConnect = your "global mobile wallet" story
 WalletConnect (bundled in the kit) is what lets **mobile wallets** connect by QR/deeplink. This is the real answer to "I want people to use their phone wallet." You'll need a free WalletConnect (Reown) project ID.
@@ -579,9 +574,9 @@ Grounded in this repository's actual files:
 - [ ] Add `app/~offline/page.tsx`; add install-prompt component; update `viewport` in [app/layout.tsx:62](../app/layout.tsx#L62) with `viewport-fit=cover`.
 
 **Wallets**
-- [ ] Replace [lib/stellar/walletsKit.ts](../lib/stellar/walletsKit.ts) with `@creit.tech/stellar-wallets-kit` (already in deps); update [hooks/useWallet.ts](../hooks/useWallet.ts).
+- [x] Replace the hand-rolled wallet implementation with `@creit.tech/stellar-wallets-kit`.
 - [ ] Add WalletConnect project id env; test a mobile wallet + Trust Wallet via WC.
-- [ ] Rebuild the connect modal as a React component (kill the `document.createElement` modal).
+- [x] Use the maintained kit's connection modal instead of the bespoke `document.createElement` modal.
 
 **Stablecoin**
 - [ ] Add USDC asset + issuer env; "Enable USDC" (`changeTrust`) onboarding step.

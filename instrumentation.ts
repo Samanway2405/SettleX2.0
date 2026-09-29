@@ -11,8 +11,28 @@ export async function register() {
   // Only the Node.js runtime has the env and the auth code; the edge runtime
   // (middleware) imports neither.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
+
+  // Error reporting is installed in every environment, before the config check
+  // below — otherwise a failed production boot, the single most important error
+  // to capture, would happen with no reporter attached.
+  const { initObservability } = await import("@/lib/observability/init");
+  initObservability();
+
   if (process.env.NODE_ENV !== "production") return;
 
   const { assertAuthConfig } = await import("@/lib/auth/serverConfig");
-  assertAuthConfig();
+  const { reportError } = await import("@/lib/observability/logger");
+
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn("WARNING: SUPABASE_SERVICE_ROLE_KEY is not set. Security controls are degraded: replay protection, rate limiting, and token revocation are inactive.");
+  }
+
+  try {
+    assertAuthConfig();
+  } catch (err) {
+    // Report before rethrowing: the throw is what stops the boot, but without
+    // this the reason never reaches the error tracker.
+    reportError("boot.config_invalid", err);
+    throw err;
+  }
 }

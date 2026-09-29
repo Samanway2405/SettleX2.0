@@ -11,6 +11,7 @@ interface TripCardProps {
   trip: Trip;
   expenseCount?: number;
   totalXLM?: number | string | bigint;
+  currentUserPublicKey?: string | null;
   onDelete: (id: string) => void;
   index?: number;
 }
@@ -19,9 +20,18 @@ export function TripCard({
   trip,
   expenseCount = 0,
   totalXLM = 0,
+  currentUserPublicKey,
   onDelete,
   index = 0,
 }: TripCardProps) {
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
+  const isOwner =
+    !!currentUserPublicKey && trip.createdByWallet === currentUserPublicKey;
+
+  React.useEffect(() => {
+    if (!isOwner) setConfirmDelete(false);
+  }, [isOwner]);
+
   const createdAt = new Date(trip.createdAt).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
@@ -83,18 +93,40 @@ export function TripCard({
       </Link>
 
       {/* Footer */}
-      <div className="flex items-center justify-between px-4 py-3 border-t border-[#F5F5F5]">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-4 py-3 border-t border-[#F5F5F5]">
         <span className="text-[10px] text-[#BBB]">{createdAt}</span>
-        <button
-          onClick={(e) => {
-            e.preventDefault();
-            onDelete(trip.id);
-          }}
-          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-[#CCC] hover:text-red-500 hover:bg-red-50 transition-colors"
-        >
-          <Trash2 size={11} />
-          Delete
-        </button>
+        {isOwner && (
+          confirmDelete ? (
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 px-3 py-2 rounded-xl bg-red-50 border border-red-200">
+              <p className="text-xs text-red-600 font-medium break-words">
+                Delete &ldquo;{trip.name}&rdquo;? This cannot be undone.
+              </p>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirmDelete(false); }}
+                  className="text-xs font-semibold text-[#888] hover:text-[#0F0F14] transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(trip.id); }}
+                  className="inline-flex items-center gap-1 text-xs font-bold text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-lg transition-colors"
+                >
+                  <Trash2 size={11} />
+                  Delete
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirmDelete(true); }}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-[#CCC] hover:text-red-500 hover:bg-red-50 transition-colors"
+            >
+              <Trash2 size={11} />
+              Delete
+            </button>
+          )
+        )}
       </div>
     </motion.div>
   );

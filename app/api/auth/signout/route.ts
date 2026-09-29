@@ -8,8 +8,10 @@
  *
  * `everywhere: true` revokes every token issued to the wallet up to now, which
  * is the control to reach for after losing a device.
+ *
+ * A sign-out that silently fails to revoke leaves a live token behind, so every
+ * failure path here is reported rather than printed.
  */
-import { NextResponse } from "next/server";
 import { verifyJwt } from "@/lib/auth/jwt";
 import { WALLET_CLAIM } from "@/lib/auth/constants";
 import { clientKey, rateLimit } from "@/lib/auth/rateLimit";
@@ -20,6 +22,8 @@ import {
   revokeWallet,
 } from "@/lib/auth/revocation";
 import { AuthConfigError, getJwtSecret } from "@/lib/auth/serverConfig";
+import { countMetric } from "@/lib/observability/logger";
+import { jsonWithCorrelation, requestLogger } from "@/lib/observability/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,9 +31,14 @@ export const dynamic = "force-dynamic";
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 export async function POST(request: Request) {
+  const logger = requestLogger("POST /api/auth/signout", request);
+
   const limit = rateLimit(`signout:${clientKey(request)}`, 30, 60_000);
   if (!limit.allowed) {
-    return NextResponse.json(
+    logger.warn("auth.signout_rate_limited", { retryAfter: limit.retryAfter });
+    logger.finish("auth.signout_completed", 429);
+    return jsonWithCorrelation(
+      logger,
       { error: "Too many requests. Please wait a moment." },
       { status: 429, headers: { ...NO_STORE, "Retry-After": String(limit.retryAfter) } },
     );
@@ -38,7 +47,9 @@ export async function POST(request: Request) {
   const header = request.headers.get("authorization") ?? "";
   const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
   if (!token) {
-    return NextResponse.json(
+    logger.finish("auth.signout_completed", 401, { reason: "missing_token" });
+    return jsonWithCorrelation(
+      logger,
       { error: "An access token is required." },
       { status: 401, headers: NO_STORE },
     );
@@ -57,7 +68,10 @@ export async function POST(request: Request) {
     // needs no revoking anyway, so this is not a lockout risk.
     const claims = verifyJwt(token, getJwtSecret());
     if (!claims) {
-      return NextResponse.json(
+      logger.warn("auth.signout_rejected", { reason: "invalid_token" });
+      logger.finish("auth.signout_completed", 401, { reason: "invalid_token" });
+      return jsonWithCorrelation(
+        logger,
         { error: "That access token is not valid." },
         { status: 401, headers: NO_STORE },
       );
@@ -67,7 +81,10 @@ export async function POST(request: Request) {
     const jti = claims.jti;
     const exp = claims.exp;
     if (typeof walletAddress !== "string" || typeof exp !== "number") {
-      return NextResponse.json(
+      logger.warn("auth.signout_rejected", { reason: "malformed_claims" });
+      logger.finish("auth.signout_completed", 401, { reason: "malformed_claims" });
+      return jsonWithCorrelation(
+        logger,
         { error: "That access token is not valid." },
         { status: 401, headers: NO_STORE },
       );
@@ -75,8 +92,14 @@ export async function POST(request: Request) {
 
     if (!isRevocationConfigured()) {
       // Say so plainly rather than reporting a sign-out that did not happen.
-      console.error("Sign-out cannot revoke: SUPABASE_SERVICE_ROLE_KEY is not set.");
-      return NextResponse.json(
+      // Reported as an error: the operator must know tokens cannot be revoked.
+      logger.error("auth.revocation_not_configured", undefined, {
+        walletAddress,
+        detail: "SUPABASE_SERVICE_ROLE_KEY is not set.",
+      });
+      logger.finish("auth.signout_completed", 503, { reason: "revocation_not_configured" });
+      return jsonWithCorrelation(
+        logger,
         { error: "Server-side sign-out is not configured on this server." },
         { status: 503, headers: NO_STORE },
       );
@@ -87,7 +110,10 @@ export async function POST(request: Request) {
     } else {
       if (typeof jti !== "string") {
         // Tokens minted before `jti` existed cannot be denied individually.
-        return NextResponse.json(
+        logger.warn("auth.signout_rejected", { walletAddress, reason: "no_jti" });
+        logger.finish("auth.signout_completed", 409, { reason: "no_jti" });
+        return jsonWithCorrelation(
+          logger,
           { error: "This session predates revocation support — sign out everywhere instead." },
           { status: 409, headers: NO_STORE },
         );
@@ -95,25 +121,33 @@ export async function POST(request: Request) {
       await revokeToken({ jti, walletAddress, expiresAt: exp });
     }
 
-    return NextResponse.json({ revoked: true, everywhere }, { headers: NO_STORE });
+    countMetric("auth.session_revoked", { everywhere });
+    logger.finish("auth.signout_completed", 200, { walletAddress, everywhere });
+    return jsonWithCorrelation(logger, { revoked: true, everywhere }, { headers: NO_STORE });
   } catch (err) {
     if (err instanceof AuthConfigError) {
-      console.error("Wallet auth is not configured:", err.message);
-      return NextResponse.json(
+      logger.error("auth.config_missing", err);
+      logger.finish("auth.signout_completed", 503, { reason: "config_missing" });
+      return jsonWithCorrelation(
+        logger,
         { error: "Wallet authentication is not configured on this server." },
         { status: 503, headers: NO_STORE },
       );
     }
     if (err instanceof RevocationUnavailable) {
       // Fail loudly: the browser must not report a sign-out that did not happen.
-      console.error("Token revocation failed:", err.message);
-      return NextResponse.json(
+      logger.error("auth.revocation_failed", err);
+      logger.finish("auth.signout_completed", 503, { reason: "revocation_unavailable" });
+      return jsonWithCorrelation(
+        logger,
         { error: "Could not sign out. Please try again." },
         { status: 503, headers: { ...NO_STORE, "Retry-After": "5" } },
       );
     }
-    console.error("Failed to sign out:", err);
-    return NextResponse.json(
+    logger.error("auth.signout_failed", err);
+    logger.finish("auth.signout_completed", 500);
+    return jsonWithCorrelation(
+      logger,
       { error: "Could not sign out." },
       { status: 500, headers: NO_STORE },
     );

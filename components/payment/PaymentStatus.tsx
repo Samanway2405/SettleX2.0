@@ -46,7 +46,8 @@ export function PaymentStatus({ state, onReset, onRetryOnChain, className }: Pay
           transition={{ duration: 0.2 }}
           className={cn("rounded-xl border p-4", className, {
             "bg-[#F8FFF0] border-[#B9FF66]/40": state.status === "success",
-            "bg-red-50 border-red-200":          state.status === "error",
+            "bg-amber-50 border-amber-200":     state.status === "partial_success",
+            "bg-red-50 border-red-200":         state.status === "error",
             "bg-[#F8F8F8] border-[#E5E5E5]":    isLoadingState,
           })}
         >

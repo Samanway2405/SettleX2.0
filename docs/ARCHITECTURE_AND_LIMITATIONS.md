@@ -55,22 +55,38 @@ SettleX uses:
 - CI merge protection enforcement is a GitHub repository setting and must be enabled manually in repo settings.
 - Wallet UX depends on extension behavior and user approval flow, including the
   one-per-session signature that establishes an authenticated session.
-- The replay guard and the rate limiter need `SUPABASE_SERVICE_ROLE_KEY` set and
-  `supabase-setup.sql` applied. Without them both fall back to process memory
-  and are per-instance: a captured challenge can be replayed against a sibling
-  instance for the rest of the (60-second) challenge TTL, and the real
-  throughput becomes 30 requests/minute times the instance count. Verify the key
-  is set before any multi-instance deployment.
-- The replay guard fails closed — if the shared store is configured but
-  unreachable, `/api/auth/verify` returns 503 rather than minting a token it
-  cannot prove is single-use. The rate limiter fails open onto the in-memory
-  window, so a database blip throttles harder instead of blocking sign-in.
-- Issued access tokens are bearer tokens with no revocation list. Signing out
-  clears the browser's copy but a leaked token stays valid until it expires —
-  shorten `AUTH_SESSION_TTL_SECONDS` if that matters for your deployment.
-- Expense and trip UPDATE policies let any member rewrite the whole row,
-  including `member_wallets`. Membership is therefore only as trustworthy as
-  the other members of a split.
+- **Serverless replay and rate-limit state — conditionally mitigated.** The
+  durable mitigation is implemented by the `auth_nonces` and
+  `auth_rate_limits` tables/RPCs in `supabase-setup.sql`, but it is active only
+  when that schema is deployed and `SUPABASE_SERVICE_ROLE_KEY` is configured.
+  Without both, the guards fall back to process memory: a captured challenge
+  can be replayed against a sibling instance for the rest of the 60-second
+  challenge TTL, and the effective limit becomes 30 requests/minute times the
+  instance count. Treat the service-role key and current schema as required for
+  every multi-instance/serverless deployment; the in-memory path is suitable
+  only for local or single-process use.
+- If the shared store is configured but unreachable, the replay guard fails
+  closed: `/api/auth/verify` returns 503 rather than minting a token it cannot
+  prove is single-use. The rate limiter deliberately falls back to its local
+  window so a database outage does not block every sign-in. That fallback is
+  weaker across instances and is not a substitute for an edge/WAF rate limit.
+- **Token revocation — conditionally mitigated.** Current schema and route code
+  maintain `revoked_tokens` and `revoked_wallets`, and `settlex_wallet()` denies
+  revoked JWTs. This depends on the same service-role configuration and current
+  `supabase-setup.sql`; without them server-side sign-out returns 503 and a
+  leaked bearer token remains valid until expiry. Keep
+  `AUTH_SESSION_TTL_SECONDS` short enough for that residual risk.
+- **RLS has no column-level protection by itself — mitigated by database
+  triggers, but deployment-dependent.** The expense and trip UPDATE policies
+  intentionally authorize a member at row level. The current schema adds
+  `validate_expense_update`, `validate_trip_update`, and
+  `validate_user_update` `BEFORE UPDATE` triggers: creator/identity fields are
+  immutable, non-creators cannot change membership or split metadata, and a
+  member can only mark their own share paid with a transaction hash. These
+  checks exist only after the latest `supabase-setup.sql` has been applied;
+  older deployments that have only the RLS policies still allow an authorized
+  member to rewrite every column in the row. Schema version checks and RLS/
+  trigger breach tests are therefore required before production use.
 - Some screenshots in README are desktop captures; mobile screenshots should be added for evaluator clarity.
 - Pool balances are internal contract accounting credits, not native XLM/token custody transfers on-chain.
 - `record_payment` stores the provided `payer`, `amount` and `tx_hash` without
@@ -108,9 +124,11 @@ SettleX uses:
 - Consider requiring the payer to co-sign `record_payment` as a second source of
   truth. Not done here because the frontend signs with a single wallet, so it
   would break every payment until a co-signature flow is built.
-- Add a token revocation list to the shared auth store so sign-out holds across
-  instances (challenge nonces already live there).
+- Add a deployment health check that verifies the shared auth RPCs, revocation
+  tables, and column-validation triggers exist before serving production
+  traffic.
 - Sweep expired `auth_nonces` / `auth_rate_limits` rows on a schedule (pg_cron)
   as well as opportunistically inside the RPCs.
-- Narrow the expense/trip UPDATE policies so membership and creator columns can
-  only be changed by the creator.
+- Prefer narrowly scoped RPCs for member update operations so callers do not
+  need broad row-level UPDATE permission; keep the validation triggers as
+  defense in depth.
