@@ -15,6 +15,8 @@ describe("decodeContractError", () => {
     [ContractErrorCode.TxHashTooLong, "Transaction hash is too long."],
     [ContractErrorCode.NotPaid, "This expense has not been settled on-chain yet."],
     [ContractErrorCode.Unauthorized, "Authorization failed for this operation."],
+    [ContractErrorCode.InvalidPage, "Payment history page size is invalid."],
+    [ContractErrorCode.IndexOverflow, "Payment history index is full."],
     [PoolErrorCode.AlreadyInitialized, "Pool is already initialized."],
     [PoolErrorCode.NotInitialized, "Pool contract is not initialized yet."],
     [PoolErrorCode.Unauthorized, "Pool authorization failed."],

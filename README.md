@@ -268,7 +268,7 @@ This section maps the required submission checklist to concrete proof in this re
 | Function                                                              | Type  | Purpose                                                 |
 | --------------------------------------------------------------------- | ----- | ------------------------------------------------------- |
 | `record_payment(trip_id, expense_id, payer, member, amount, tx_hash)` | Write | Stores payment record on-chain after XLM transfer       |
-| `get_payments(trip_id)`                                               | Read  | Returns all payment records for a trip                  |
+| `get_payments(trip_id, offset, limit)`                                | Read  | Returns a bounded page of expense payment shards        |
 | `is_paid(expense_id, member)`                                         | Read  | Checks if a member has already settled a specific share |
 
 **Error codes handled by the frontend:**

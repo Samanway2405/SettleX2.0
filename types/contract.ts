@@ -50,6 +50,8 @@ export enum ContractErrorCode {
   TxHashTooLong = 10,
   NotPaid = 11,
   Unauthorized = 12,
+  InvalidPage = 13,
+  IndexOverflow = 14,
 }
 
 export enum PoolErrorCode {
