@@ -1076,9 +1076,17 @@ BEGIN
             CASE 
                 WHEN elem->>'memberId' = p_member_id THEN 
                     pg_catalog.jsonb_set(
-                        pg_catalog.jsonb_set(elem, '{paid}', 'true'::jsonb),
-                        '{txHash}', 
-                        pg_catalog.to_jsonb(p_tx_hash)
+                        pg_catalog.jsonb_set(
+                            pg_catalog.jsonb_set(
+                                pg_catalog.jsonb_set(elem, '{paid}', 'true'::jsonb),
+                                '{txHash}', 
+                                pg_catalog.to_jsonb(p_tx_hash)
+                            ),
+                            '{paidBy}',
+                            pg_catalog.to_jsonb(v_caller_wallet)
+                        ),
+                        '{markedAt}',
+                        pg_catalog.to_jsonb(pg_catalog.to_char(pg_catalog.now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                     )
                 ELSE elem 
             END

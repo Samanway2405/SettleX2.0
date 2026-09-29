@@ -5,7 +5,7 @@ import { CheckCircle2, ExternalLink, Layers } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { TransactionHash } from "@/components/payment/TransactionHash";
 import { STELLAR_EXPLORER } from "@/lib/utils/constants";
-import { cn, formatXLM } from "@/lib/utils";
+import { cn, formatAddress, formatXLM } from "@/lib/utils";
 
 export interface ReceiptModalProps {
   open: boolean;
@@ -16,6 +16,8 @@ export interface ReceiptModalProps {
   amount: string;
   recipientName: string;
   ledger?: number;
+  paidBy?: string;
+  markedAt?: string;
 }
 
 export function ReceiptModal({
@@ -26,6 +28,8 @@ export function ReceiptModal({
   amount,
   recipientName,
   ledger,
+  paidBy,
+  markedAt,
 }: ReceiptModalProps) {
   const explorerUrl = `${STELLAR_EXPLORER}/tx/${txHash}`;
   const displayAmount = formatXLM(amount);
@@ -70,6 +74,33 @@ export function ReceiptModal({
         />
         {ledger !== undefined && (
           <ReceiptRow label="Ledger" value={`#${ledger}`} />
+        )}
+        {paidBy && (
+          <ReceiptRow
+            label="Marked Paid By"
+            value={
+              <a
+                href={`${STELLAR_EXPLORER}/account/${paidBy}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs text-[#0F0F14] hover:underline inline-flex items-center gap-1"
+                title={paidBy}
+              >
+                {formatAddress(paidBy, 6)}
+                <ExternalLink size={10} className="opacity-60" />
+              </a>
+            }
+          />
+        )}
+        {markedAt && (
+          <ReceiptRow
+            label="Marked At"
+            value={
+              <span className="text-xs text-[#555]">
+                {new Date(markedAt).toLocaleString()}
+              </span>
+            }
+          />
         )}
       </dl>
 

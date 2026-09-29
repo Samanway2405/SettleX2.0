@@ -8,6 +8,7 @@ import { STELLAR_EXPLORER } from "@/lib/utils/constants";
 import { PayButton } from "@/components/payment/PayButton";
 import { QRToggle } from "@/components/payment/QRCodeDisplay";
 import { ReceiptModal } from "@/components/expenses/ReceiptModal";
+import type { SplitShare } from "@/types/expense";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +57,14 @@ export function PaymentRow({
     (!connectedWalletAddress ||
       (!!share.walletAddress && share.walletAddress === connectedWalletAddress));
 
+  // When paidBy is recorded and doesn't match the share owner, someone else marked this share paid
+  const isMarkedByOther = Boolean(
+    share.paid &&
+      share.paidBy &&
+      (!share.walletAddress ||
+        share.paidBy.toUpperCase() !== share.walletAddress.toUpperCase())
+  );
+
   return (
     <>
       <motion.div
@@ -99,6 +108,29 @@ export function PaymentRow({
                   {formatAddress(share.walletAddress, 4)}
                   <ExternalLink size={9} />
                 </a>
+              )}
+              {share.paid && isMarkedByOther && share.paidBy && (
+                <p
+                  className="text-[11px] text-[#666] flex items-center gap-1 mt-0.5"
+                  title={
+                    share.markedAt
+                      ? `Marked at ${new Date(share.markedAt).toLocaleString()} by ${share.paidBy}`
+                      : `Marked by ${share.paidBy}`
+                  }
+                >
+                  <span>marked paid by</span>
+                  <a
+                    href={`${STELLAR_EXPLORER}/account/${share.paidBy}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono text-[#0F0F14] hover:underline inline-flex items-center gap-0.5"
+                    onClick={(e) => e.stopPropagation()}
+                    title={share.paidBy}
+                  >
+                    {formatAddress(share.paidBy, 4)}
+                    <ExternalLink size={9} />
+                  </a>
+                </p>
               )}
               {share.paid && share.txHash && (
                 <button
@@ -159,6 +191,8 @@ export function PaymentRow({
           memo={memo}
           amount={share.amount}
           recipientName={share.name}
+          paidBy={share.paidBy}
+          markedAt={share.markedAt}
         />
       )}
     </>
