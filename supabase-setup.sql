@@ -683,7 +683,11 @@ EXECUTE FUNCTION update_updated_at_column();
 
 -- Trigger function for column-level validation and authorization on expenses
 CREATE OR REPLACE FUNCTION public.validate_expense_update()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     v_caller TEXT;
     v_is_creator BOOLEAN;
@@ -840,11 +844,15 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$;
 
 -- Trigger function for column-level validation and authorization on trips
 CREATE OR REPLACE FUNCTION public.validate_trip_update()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     v_caller TEXT;
     v_is_creator BOOLEAN;
@@ -925,11 +933,15 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$;
 
 -- Trigger function for column-level validation on users
 CREATE OR REPLACE FUNCTION public.validate_user_update()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     v_caller TEXT;
 BEGIN
@@ -956,7 +968,7 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$;
 
 -- Drop existing validation triggers if they exist
 DROP TRIGGER IF EXISTS validate_users_update ON users;
