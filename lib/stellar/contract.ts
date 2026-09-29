@@ -162,7 +162,8 @@ export async function precheckPoolBalance(
     return { ok: false, requiredStroops, error: "Contract not configured." };
   }
 
-  // The pool requirement has been removed, so balance is always sufficient.
+  // Pure ledger write model (Issue #131): recording payments is a pure ledger write
+  // to the SettleX contract and does not require pre-funded pool credits.
   return { ok: true, requiredStroops, balanceStroops: requiredStroops };
 }
 

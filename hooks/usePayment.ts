@@ -3,7 +3,7 @@
 import { useCallback, useState } from "react";
 import { buildPaymentTransaction } from "@/lib/stellar/buildTransaction";
 import { submitSignedTransaction } from "@/lib/stellar/submitTransaction";
-import { recordPaymentOnChain, checkIsPaid, precheckPoolBalance } from "@/lib/stellar/contract";
+import { recordPaymentOnChain, checkIsPaid } from "@/lib/stellar/contract";
 import { signXDR } from "@/lib/freighter";
 import { useWallet } from "@/hooks/useWallet";
 import { useExpense } from "@/hooks/useExpense";
@@ -87,28 +87,7 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
     if (!pendingOnChain) return;
     if (!(await hasCurrentPaymentNetwork("retrying"))) return;
 
-    const poolCheck = await precheckPoolBalance(
-      pendingOnChain.memberPublicKey,
-      pendingOnChain.memberPublicKey,
-      pendingOnChain.amountXlm,
-    );
-    if (!poolCheck.ok) {
-      const msg = poolCheck.error ?? "Pool balance precheck failed.";
-      countMetric("payment.partial_success", { stage: "retry_pool_precheck" });
-      reportError("payment.onchain_retry_blocked", msg, {
-        fields: { expenseId: pendingOnChain.expenseId, txHash: pendingOnChain.txHash },
-      });
-      setPaymentState({
-        status: "partial_success",
-        hash: pendingOnChain.txHash,
-        ledger: pendingOnChain.ledger,
-        onChain: false,
-        message: msg,
-      });
-      toastError("On-chain retry blocked", msg);
-      return;
-    }
-
+    setPaymentState({ status: "recording", step: "simulating" });
     const contractResult = await recordPaymentOnChain({
       ...pendingOnChain,
       onStatus: (step) => setPaymentState({ status: "recording", step }),
@@ -195,21 +174,6 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
         let onChain = false;
         let onChainError: string | null = null;
         if (CONTRACT_ID && tripId) {
-          const poolCheck = await precheckPoolBalance(publicKey, publicKey, share.amount);
-          if (!poolCheck.ok) {
-            onChainError =
-              poolCheck.error ??
-              "Pool balance is too low to record this payment on-chain.";
-            setPendingOnChain({
-              memberPublicKey: publicKey,
-              tripId,
-              expenseId,
-              payerPublicKey: payerWalletAddress,
-              amountXlm: share.amount,
-              txHash: result.hash,
-              ledger: result.ledger,
-            });
-          } else {
           setPaymentState({ status: "recording", step: "simulating" });
           const contractResult = await recordPaymentOnChain({
             memberPublicKey: publicKey,
@@ -235,7 +199,6 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
               ledger: result.ledger,
             });
           }
-          }
         }
 
         // Always sync local state after successful XLM transfer so UI reflects financial reality.
@@ -257,7 +220,7 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
           });
           toastInfo(
             "Payment sent, on-chain record pending",
-            "XLM transfer succeeded. Use retry after fixing contract prerequisites (e.g. pool balance).",
+            "XLM transfer succeeded. Use retry to record it on-chain.",
           );
           setTimeout(() => refreshBalance(), 3000);
           setTimeout(() => refreshBalance(), 8000);

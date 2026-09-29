@@ -192,9 +192,9 @@ impl SettlementPoolContract {
             panic_with_error!(&env, PoolError::AmountTooLarge);
         }
 
-        // Pool credits are admin-managed to avoid untrusted self-minting.
-        let cfg = Self::get_config(env.clone());
-        cfg.admin.require_auth();
+        // Self-service deposit: member authorizes the deposit of credits.
+        let _cfg = Self::get_config(env.clone());
+        member.require_auth();
 
         let key = PoolDataKey::Balance(member.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0_i128);
