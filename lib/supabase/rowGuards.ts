@@ -89,6 +89,9 @@ export function parseExpenseRow(row: unknown): Expense {
     createdAt: asString(row.created_at, "created_at"),
     settled: asBoolean(row.settled, "settled"),
     version: asVersion(row.version),
+    createdByWallet: asString(row.created_by_wallet, "created_by_wallet"),
+    memberWallets: asStringArray(row.member_wallets, "member_wallets"),
+    acceptedWallets: asStringArray(row.accepted_wallets, "accepted_wallets"),
   };
 
   if (!expense.members.every((member) => typeof member.id === "string" && typeof member.name === "string")) {
@@ -119,7 +122,9 @@ export function parseTripRow(row: unknown): Trip {
     })),
     expenseIds: asStringArray(row.expense_ids, "expense_ids"),
     createdAt: asString(row.created_at, "created_at"),
-    createdByWallet: asOptionalString(row.created_by_wallet, "created_by_wallet"),
+    createdByWallet: asString(row.created_by_wallet, "created_by_wallet"),
+    memberWallets: asStringArray(row.member_wallets, "member_wallets"),
+    acceptedWallets: asStringArray(row.accepted_wallets, "accepted_wallets"),
     settled: asBoolean(row.settled, "settled"),
   };
 

@@ -25,6 +25,7 @@ export interface Database {
           settled: boolean;
           created_by_wallet: string;
           member_wallets: string[];
+          accepted_wallets: string[];
         };
         Insert: {
           id?: string;
@@ -41,6 +42,7 @@ export interface Database {
           settled?: boolean;
           created_by_wallet: string;
           member_wallets?: string[];
+          accepted_wallets?: string[];
         };
         Update: {
           id?: string;
@@ -57,6 +59,7 @@ export interface Database {
           settled?: boolean;
           created_by_wallet?: string;
           member_wallets?: string[];
+          accepted_wallets?: string[];
         };
       };
       trips: {
@@ -71,6 +74,7 @@ export interface Database {
           settled: boolean;
           created_by_wallet: string;
           member_wallets: string[];
+          accepted_wallets: string[];
         };
         Insert: {
           id?: string;
@@ -83,6 +87,7 @@ export interface Database {
           settled?: boolean;
           created_by_wallet: string;
           member_wallets?: string[];
+          accepted_wallets?: string[];
         };
         Update: {
           id?: string;
@@ -95,6 +100,7 @@ export interface Database {
           settled?: boolean;
           created_by_wallet?: string;
           member_wallets?: string[];
+          accepted_wallets?: string[];
         };
       };
     };
@@ -102,7 +108,23 @@ export interface Database {
       [_ in never]: never;
     };
     Functions: {
-      [_ in never]: never;
+      get_pending_invitations: {
+        Args: Record<PropertyKey, never>;
+        Returns: {
+          entity_type: "expense" | "trip";
+          entity_id: string;
+          title: string;
+          created_by_wallet: string;
+          created_at: string;
+        }[];
+      };
+      accept_invitation: {
+        Args: {
+          p_entity_type: "expense" | "trip";
+          p_entity_id: string;
+        };
+        Returns: undefined;
+      };
     };
     Enums: {
       [_ in never]: never;

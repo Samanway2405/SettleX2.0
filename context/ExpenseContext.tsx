@@ -60,22 +60,22 @@ ExpenseContext.displayName = "ExpenseContext";
 
 function isRowForWallet(row: any, walletAddress: string | null): boolean {
   if (!walletAddress) return false;
+  return (
+    row?.created_by_wallet === walletAddress ||
+    (Array.isArray(row?.member_wallets) &&
+      row.member_wallets.includes(walletAddress) &&
+      Array.isArray(row?.accepted_wallets) &&
+      row.accepted_wallets.includes(walletAddress))
+  );
+}
 
-  const memberWallets = new Set<string>();
-  const rowMembers = Array.isArray(row?.members) ? row.members : [];
-  const rowMemberWallets = Array.isArray(row?.member_wallets) ? row.member_wallets : [];
-
-  for (const member of rowMembers) {
-    if (member?.walletAddress) memberWallets.add(member.walletAddress);
-  }
-
-  for (const wallet of rowMemberWallets) {
-    if (wallet) memberWallets.add(wallet);
-  }
-
-  if (row?.created_by_wallet) memberWallets.add(row.created_by_wallet);
-
-  return memberWallets.has(walletAddress);
+function isCachedExpenseForWallet(expense: Expense, walletAddress: string | null): boolean {
+  if (!walletAddress) return false;
+  return (
+    expense.createdByWallet === walletAddress ||
+    (!!expense.memberWallets?.includes(walletAddress) &&
+      !!expense.acceptedWallets?.includes(walletAddress))
+  );
 }
 
 /**
@@ -114,6 +114,7 @@ function expenseToDbInsertRow(expense: Expense, creatorWallet: string) {
     version: expense.version ?? 1,
     created_by_wallet: creatorWallet,
     member_wallets: allMemberWallets,
+    accepted_wallets: [creatorWallet],
   };
 }
 
@@ -135,7 +136,13 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
   // Rebind whenever the session is established or dropped, so a re-signed
   // session never leaves this provider holding a client with a stale token.
   const [sessionGeneration, setSessionGeneration] = useState(0);
+  const [consentGeneration, setConsentGeneration] = useState(0);
   useEffect(() => onSessionChange(() => setSessionGeneration((n) => n + 1)), []);
+  useEffect(() => {
+    const refresh = () => setConsentGeneration((n) => n + 1);
+    window.addEventListener("settlex:consent-changed", refresh);
+    return () => window.removeEventListener("settlex:consent-changed", refresh);
+  }, []);
 
   // Resolve the authenticated client once per wallet so the initial load and
   // the realtime feed share it. Concurrent callers reuse a single handshake,
@@ -186,7 +193,10 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
         }
         try {
           const raw = localStorage.getItem(cacheKey);
-          if (raw && isMounted) setExpenses(JSON.parse(raw) as Expense[]);
+          if (raw && isMounted) {
+            const cached = JSON.parse(raw) as Expense[];
+            setExpenses(cached.filter((expense) => isCachedExpenseForWallet(expense, publicKey)));
+          }
         } catch {
           // ignore
         }
@@ -212,7 +222,10 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
         logWarn("expense.load_failed_using_cache", { fields: supabaseErrorFields(err) });
         try {
           const raw = localStorage.getItem(cacheKey);
-          if (raw && isMounted) setExpenses(JSON.parse(raw) as Expense[]);
+          if (raw && isMounted) {
+            const cached = JSON.parse(raw) as Expense[];
+            setExpenses(cached.filter((expense) => isCachedExpenseForWallet(expense, publicKey)));
+          }
         } catch {
           // ignore
         }
@@ -228,7 +241,7 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
     return () => {
       isMounted = false;
     };
-  }, [client, publicKey]);
+  }, [client, publicKey, consentGeneration]);
 
   // Realtime authorizes on the socket's own JWT, so the feed has to run on the
   // authenticated client too — the anon client would receive nothing.
@@ -244,7 +257,15 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
         { event: "INSERT", schema: "public", table: "expenses" },
         (payload: RealtimePostgresChangesPayload<any>) => {
           const row = payload.new;
-          if (!row || !isRowForWallet(row, publicKey)) return;
+          if (!row) return;
+          if (!isRowForWallet(row, publicKey)) {
+            setExpenses((prev) => {
+              const updated = prev.filter((expense) => expense.id !== row.id);
+              localStorage.setItem(cacheKey, JSON.stringify(updated));
+              return updated;
+            });
+            return;
+          }
           const newExpense = dbRowToExpense(row);
           setExpenses((prev) => {
             if (prev.some((e) => e.id === newExpense.id)) return prev;
@@ -303,8 +324,21 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
 
     const cacheKey = getWalletScopedKey(LS_EXPENSES, publicKey);
 
+    const memberWallets = expense.members
+      .map((member) => member.walletAddress)
+      .filter((address): address is string => !!address);
+    const allMemberWallets = memberWallets.includes(publicKey)
+      ? memberWallets
+      : [publicKey, ...memberWallets];
+    const localExpense: Expense = {
+      ...expense,
+      createdByWallet: publicKey,
+      memberWallets: allMemberWallets,
+      acceptedWallets: [publicKey],
+    };
+
     setExpenses((prev) => {
-      const updated = [expense, ...prev];
+      const updated = [localExpense, ...prev];
       localStorage.setItem(cacheKey, JSON.stringify(updated));
       return updated;
     });

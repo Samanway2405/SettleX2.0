@@ -15,6 +15,7 @@ describe("User Directory Privacy & Scoping (Issue #49)", () => {
       id: "exp-1",
       created_by_wallet: aliceWallet,
       member_wallets: [aliceWallet, bobWallet],
+      accepted_wallets: [aliceWallet, bobWallet],
       shares: [
         { walletAddress: aliceWallet, amount: "10" },
         { walletAddress: bobWallet, amount: "10" },
@@ -27,6 +28,7 @@ describe("User Directory Privacy & Scoping (Issue #49)", () => {
       id: "trip-1",
       created_by_wallet: aliceWallet,
       member_wallets: [aliceWallet, bobWallet],
+      accepted_wallets: [aliceWallet, bobWallet],
     },
   ];
 
@@ -43,18 +45,22 @@ describe("User Directory Privacy & Scoping (Issue #49)", () => {
     // 2. Shared expense
     const sharesExpense = expenses.some((e) => {
       const callerInExpense =
-        e.member_wallets.includes(callerWallet) ||
-        e.shares.some((s) => s.walletAddress === callerWallet);
+        e.member_wallets.includes(callerWallet) &&
+        e.accepted_wallets.includes(callerWallet);
       const targetInExpense =
-        e.member_wallets.includes(targetUserWallet) ||
-        e.shares.some((s) => s.walletAddress === targetUserWallet);
+        e.member_wallets.includes(targetUserWallet) &&
+        e.accepted_wallets.includes(targetUserWallet);
       return callerInExpense && targetInExpense;
     });
     if (sharesExpense) return true;
 
     // 3. Shared trip
     const sharesTrip = trips.some(
-      (t) => t.member_wallets.includes(callerWallet) && t.member_wallets.includes(targetUserWallet)
+      (t) =>
+        t.member_wallets.includes(callerWallet) &&
+        t.accepted_wallets.includes(callerWallet) &&
+        t.member_wallets.includes(targetUserWallet) &&
+        t.accepted_wallets.includes(targetUserWallet)
     );
     if (sharesTrip) return true;
 
@@ -75,6 +81,17 @@ describe("User Directory Privacy & Scoping (Issue #49)", () => {
     expect(canViewUserRow(bobWallet, attackerWallet)).toBe(false);
     expect(canViewUserRow(strangerWallet, attackerWallet)).toBe(false);
     expect(canViewUserRow(strangerWallet, aliceWallet)).toBe(false);
+  });
+
+  it("does not treat a pending invitee as a counterparty", () => {
+    expenses[0].accepted_wallets = [aliceWallet];
+    trips[0].accepted_wallets = [aliceWallet];
+
+    expect(canViewUserRow(aliceWallet, bobWallet)).toBe(false);
+    expect(canViewUserRow(bobWallet, aliceWallet)).toBe(false);
+
+    expenses[0].accepted_wallets = [aliceWallet, bobWallet];
+    trips[0].accepted_wallets = [aliceWallet, bobWallet];
   });
 
   it("filters directory queries to only return permitted counterparties", () => {
