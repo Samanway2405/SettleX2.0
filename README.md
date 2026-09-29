@@ -64,7 +64,7 @@ Every payment produces a **real, verifiable transaction hash** on the Stellar bl
 
 ---
 
-## Features
+
 
 | Feature                                                      | Status |
 | ------------------------------------------------------------ | ------ |

@@ -508,13 +508,22 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       if (!current) throw new Error("Expense not found in state — please refresh and try again.");
 
       const cacheKey = publicKey ? getWalletScopedKey(LS_EXPENSES, publicKey) : LS_EXPENSES;
+      const nowIso = new Date().toISOString();
 
       // Optimistic local state update
       setExpenses((prev) => {
         const updated = prev.map((e) => {
           if (e.id !== expenseId) return e;
           const shares = e.shares.map((s) =>
-            s.memberId === memberId ? { ...s, paid: true, txHash } : s
+            s.memberId === memberId
+              ? {
+                  ...s,
+                  paid: true,
+                  txHash,
+                  paidBy: publicKey || s.paidBy,
+                  markedAt: s.markedAt || nowIso,
+                }
+              : s
           );
           const settled = shares.every((s) => s.paid);
           return { ...e, shares, settled };
@@ -571,7 +580,15 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
 
           // Merge: preserve any other members marked paid concurrently
           const freshShares = existingShares.map((s: SplitShare) =>
-            s.memberId === memberId ? { ...s, paid: true, txHash } : s
+            s.memberId === memberId
+              ? {
+                  ...s,
+                  paid: true,
+                  txHash,
+                  paidBy: publicKey || s.paidBy,
+                  markedAt: s.markedAt || nowIso,
+                }
+              : s
           );
           const freshSettled = freshShares.every((s: SplitShare) => s.paid);
 

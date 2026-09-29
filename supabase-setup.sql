@@ -1024,7 +1024,11 @@ $$;
 
 -- Trigger function for column-level validation and authorization on expenses
 CREATE OR REPLACE FUNCTION public.validate_expense_update()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     v_caller TEXT;
     v_is_creator BOOLEAN;
@@ -1218,11 +1222,15 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$;
 
 -- Trigger function for column-level validation and authorization on trips
 CREATE OR REPLACE FUNCTION public.validate_trip_update()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     v_caller TEXT;
     v_is_creator BOOLEAN;
@@ -1326,11 +1334,15 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$;
 
 -- Trigger function for column-level validation on users
 CREATE OR REPLACE FUNCTION public.validate_user_update()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
     v_caller TEXT;
 BEGIN
@@ -1357,7 +1369,7 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+$$;
 
 -- Drop existing validation triggers if they exist
 DROP TRIGGER IF EXISTS validate_users_update ON users;
@@ -1588,9 +1600,17 @@ BEGIN
             CASE 
                 WHEN elem->>'memberId' = p_member_id THEN 
                     pg_catalog.jsonb_set(
-                        pg_catalog.jsonb_set(elem, '{paid}', 'true'::jsonb),
-                        '{txHash}', 
-                        pg_catalog.to_jsonb(p_tx_hash)
+                        pg_catalog.jsonb_set(
+                            pg_catalog.jsonb_set(
+                                pg_catalog.jsonb_set(elem, '{paid}', 'true'::jsonb),
+                                '{txHash}', 
+                                pg_catalog.to_jsonb(p_tx_hash)
+                            ),
+                            '{paidBy}',
+                            pg_catalog.to_jsonb(v_caller_wallet)
+                        ),
+                        '{markedAt}',
+                        pg_catalog.to_jsonb(pg_catalog.to_char(pg_catalog.now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                     )
                 ELSE elem 
             END

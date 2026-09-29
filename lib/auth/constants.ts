@@ -10,6 +10,9 @@ export const CHALLENGE_ENDPOINT = "/api/auth/challenge";
 /** Route that verifies a signed challenge and mints a Supabase access token. */
 export const VERIFY_ENDPOINT = "/api/auth/verify";
 
+/** Route to revoke an access token on signout. */
+export const SIGNOUT_ENDPOINT = "/api/auth/signout";
+
 /**
  * How long a challenge stays signable, in seconds.
  *
