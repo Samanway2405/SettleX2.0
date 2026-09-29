@@ -8,7 +8,12 @@ import { signXDR } from "@/lib/freighter";
 import { useWallet } from "@/hooks/useWallet";
 import { useExpense } from "@/hooks/useExpense";
 import { useToast } from "@/components/ui/Toast";
-import { NETWORK_PASSPHRASE, STELLAR_EXPLORER, CONTRACT_ID } from "@/lib/utils/constants";
+import {
+  NETWORK_PASSPHRASE,
+  STELLAR_EXPLORER,
+  CONTRACT_ID,
+  stellarNetworkLabel,
+} from "@/lib/utils/constants";
 import { formatXLM } from "@/lib/utils";
 import { countMetric, reportError } from "@/lib/observability/logger";
 import { userFacingMessage } from "@/lib/errors/userMessage";
@@ -48,7 +53,12 @@ interface PendingOnChainRecord {
 }
 
 export function usePayment({ expenseId }: UsePaymentOpts) {
-  const { publicKey, refreshBalance } = useWallet();
+  const {
+    publicKey,
+    refreshBalance,
+    refreshNetwork,
+    expectedNetwork,
+  } = useWallet();
   const { markSharePaid } = useExpense();
   const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
 
@@ -60,8 +70,22 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
     setPendingOnChain(null);
   }, []);
 
+  const hasCurrentPaymentNetwork = useCallback(async (action: "paying" | "retrying") => {
+    const liveNetwork = await refreshNetwork();
+    if (liveNetwork === expectedNetwork) return true;
+
+    toastError(
+      "Payment blocked",
+      liveNetwork
+        ? `Switch your wallet to ${stellarNetworkLabel(expectedNetwork)} before ${action}.`
+        : `SettleX could not verify your wallet is on ${stellarNetworkLabel(expectedNetwork)}.`,
+    );
+    return false;
+  }, [expectedNetwork, refreshNetwork, toastError]);
+
   const retryOnChainRecord = useCallback(async () => {
     if (!pendingOnChain) return;
+    if (!(await hasCurrentPaymentNetwork("retrying"))) return;
 
     const poolCheck = await precheckPoolBalance(
       pendingOnChain.memberPublicKey,
@@ -115,14 +139,20 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
       onChain: true,
     });
     toastSuccess("On-chain record recovered", "Payment is now confirmed in the contract.");
-  }, [pendingOnChain, toastError, toastSuccess]);
+  }, [
+    hasCurrentPaymentNetwork,
+    pendingOnChain,
+    toastError,
+    toastSuccess,
+  ]);
 
   const payShare = useCallback(
     async ({ share, expenseTitle, payerWalletAddress, tripId }: PayShareParams) => {
       if (!publicKey) {
-        toastError("Wallet not connected", "Please connect your Freighter wallet first.");
+        toastError("Wallet not connected", "Please connect your Stellar wallet first.");
         return;
       }
+      if (!(await hasCurrentPaymentNetwork("paying"))) return;
       if (!share.walletAddress) {
         toastError("No wallet address", `${share.name} doesn't have a Stellar address.`);
         return;
@@ -269,7 +299,16 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
         toastError("Payment failed", display);
       }
     },
-    [publicKey, expenseId, markSharePaid, refreshBalance, toastSuccess, toastError, toastInfo],
+    [
+      publicKey,
+      hasCurrentPaymentNetwork,
+      expenseId,
+      markSharePaid,
+      refreshBalance,
+      toastSuccess,
+      toastError,
+      toastInfo,
+    ],
   );
 
   return {
@@ -288,4 +327,3 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
       : null,
   };
 }
-
