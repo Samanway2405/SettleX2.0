@@ -12,7 +12,7 @@
 import { NextResponse } from "next/server";
 import { verifyJwt } from "@/lib/auth/jwt";
 import { WALLET_CLAIM } from "@/lib/auth/constants";
-import { clientKey, rateLimit } from "@/lib/auth/rateLimit";
+import { clientKey, enforceRateLimit } from "@/lib/auth/rateLimit";
 import {
   RevocationUnavailable,
   isRevocationConfigured,
@@ -27,7 +27,7 @@ export const dynamic = "force-dynamic";
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 export async function POST(request: Request) {
-  const limit = rateLimit(`signout:${clientKey(request)}`, 30, 60_000);
+  const limit = await enforceRateLimit(`signout:${clientKey(request)}`, 30, 60_000);
   if (!limit.allowed) {
     return NextResponse.json(
       { error: "Too many requests. Please wait a moment." },
