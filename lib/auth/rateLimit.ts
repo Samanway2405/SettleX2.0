@@ -1,12 +1,12 @@
 /**
- * Fixed-window rate limiter for the unauthenticated auth routes.
+ * Fixed-window rate limiter for the auth routes.
  *
- * Both routes do public-key cryptography on caller-supplied input, so they are
- * worth throttling. `enforceRateLimit` counts against a window shared by every
- * instance (Postgres, via `lib/auth/sharedStore`) so the configured limit is
- * the real limit rather than the limit times the instance count. The in-memory
- * `rateLimit` below is the fallback for deployments with no shared store
- * configured; it applies per process and only blunts casual abuse.
+ * Auth routes do public-key cryptography on caller-supplied input or manage
+ * session revocation, so they are worth throttling. `enforceRateLimit` counts
+ * against a window shared by every instance (Postgres, via `lib/auth/sharedStore`)
+ * so the configured limit is the real limit rather than the limit times the
+ * instance count. The in-memory `rateLimit` below is the fallback for deployments
+ * with no shared store configured; it applies per process and only blunts casual abuse.
  *
  * Neither is a substitute for an edge/WAF rate limit in front of the
  * deployment.
