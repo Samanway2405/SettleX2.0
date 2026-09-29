@@ -90,11 +90,11 @@ Every payment produces a **real, verifiable transaction hash** on the Stellar bl
 | Framework        | Next.js 14 (App Router, TypeScript)            |
 | Styling          | Tailwind CSS 3.4, Framer Motion                |
 | Blockchain SDK   | `@stellar/stellar-sdk` v14                     |
-| Wallet support   | `@stellar/freighter-api` v6, xBull SDK, Lobstr |
+| Wallet support   | `@creit.tech/stellar-wallets-kit` v2          |
 | Smart contract   | Soroban (Rust, `soroban-sdk` v21)              |
 | Network          | Stellar Testnet (Horizon + Soroban RPC)        |
 | Database         | Supabase (PostgreSQL + Realtime)               |
-| QR codes         | `qrcode.react`, `qrcode`                       |
+| QR codes         | `qrcode.react`                                 |
 | Testing          | Jest 29 + ts-jest (45 unit tests)              |
 | State management | React Context + Supabase + localStorage        |
 | UI primitives    | Radix UI, Lucide React                         |
@@ -268,7 +268,7 @@ This section maps the required submission checklist to concrete proof in this re
 | Function                                                              | Type  | Purpose                                                 |
 | --------------------------------------------------------------------- | ----- | ------------------------------------------------------- |
 | `record_payment(trip_id, expense_id, payer, member, amount, tx_hash)` | Write | Stores payment record on-chain after XLM transfer       |
-| `get_payments(trip_id)`                                               | Read  | Returns all payment records for a trip                  |
+| `get_payments(trip_id, offset, limit)`                                | Read  | Returns a bounded page of expense payment shards        |
 | `is_paid(expense_id, member)`                                         | Read  | Checks if a member has already settled a specific share |
 
 **Error codes handled by the frontend:**
@@ -482,7 +482,7 @@ settlex/
 │   │   └── rateLimit.ts          # Throttling for the public auth routes
 │   ├── supabase/session.ts       # Wallet-authenticated Supabase client (browser)
 │   ├── stellar/
-│   │   ├── walletsKit.ts         # Custom multi-wallet provider (Freighter, xBull, Lobstr)
+│   │   ├── walletsKit.ts         # Stellar Wallets Kit adapter
 │   │   ├── contract.ts           # Soroban contract calls + error decoding
 │   │   ├── events.ts             # pmt_rec event fetch and decode
 │   │   ├── buildTransaction.ts   # Stellar Payment transaction builder

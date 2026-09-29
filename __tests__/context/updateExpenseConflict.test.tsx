@@ -59,6 +59,9 @@ function baseRow() {
     created_at: "2026-01-01T00:00:00Z",
     settled: false,
     version: 1,
+    created_by_wallet: WALLET,
+    member_wallets: [WALLET],
+    accepted_wallets: [WALLET],
   };
 }
 

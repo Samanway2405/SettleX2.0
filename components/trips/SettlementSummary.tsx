@@ -14,10 +14,12 @@ import { signXDR } from "@/lib/freighter";
 import { useWallet } from "@/hooks/useWallet";
 import { useExpense } from "@/hooks/useExpense";
 import { useToast } from "@/components/ui/Toast";
-import { NETWORK_PASSPHRASE } from "@/lib/utils/constants";
+import { NETWORK_PASSPHRASE, stellarNetworkLabel } from "@/lib/utils/constants";
 import { PayButton } from "@/components/payment/PayButton";
 import { TransactionHash } from "@/components/payment/TransactionHash";
 import { cn, formatXLM } from "@/lib/utils";
+import { userFacingMessage } from "@/lib/errors/userMessage";
+import { selectCoveredShares } from "@/lib/settlement/shareBudget";
 
 interface SettlementSummaryProps {
   trip: Trip;
@@ -101,7 +103,12 @@ function NetPaymentRow({
   expenses: Expense[];
   unverifiedClaimCount?: number;
 }) {
-  const { publicKey } = useWallet();
+  const {
+    publicKey,
+    isNetworkCompatible,
+    refreshNetwork,
+    expectedNetwork,
+  } = useWallet();
   const { markSharePaid } = useExpense();
   const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
   const [rowState, setRowState] = useState<RowState>({ status: "idle" });
@@ -109,13 +116,25 @@ function NetPaymentRow({
   const canPay =
     publicKey &&
     payment.toWallet &&
+    isNetworkCompatible &&
     rowState.status === "idle" &&
     publicKey === payment.fromWallet;
 
   const handlePay = async () => {
     if (!publicKey || !payment.toWallet) return;
+    const liveNetwork = await refreshNetwork();
+    if (liveNetwork !== expectedNetwork) {
+      toastError(
+        "Payment blocked",
+        liveNetwork
+          ? `Switch your wallet to ${stellarNetworkLabel(expectedNetwork)} before paying.`
+          : `SettleX could not verify your wallet is on ${stellarNetworkLabel(expectedNetwork)}.`,
+      );
+      return;
+    }
     try {
       setRowState({ status: "paying" });
+      const coveredShares = selectCoveredShares(payment, expenses);
       const memo = `SettleX|${tripName}`.slice(0, 28);
       const { xdr } = await buildPaymentTransaction({
         sourcePublicKey:      publicKey,
@@ -131,17 +150,11 @@ function NetPaymentRow({
       // A netted payment may be smaller than the gross obligations it represents
       // (e.g. A owes B 10 XLM and B owes A 4 XLM → net 6 XLM transfer). Marking
       // ALL of A's shares paid would write off 10 XLM while only 6 XLM moved.
-      let budgetRemaining = parseFloat(payment.amount);
-      outer: for (const expense of expenses) {
-        const payer = expense.members.find((m) => m.id === expense.paidByMemberId);
-        if (!payer || payer.id !== payment.toId) continue;
-        for (const share of expense.shares) {
-          if (share.memberId !== payment.fromId || share.paid) continue;
-          const shareAmt = parseFloat(share.amount);
-          if (budgetRemaining < shareAmt - 0.0000001) break outer; // can't cover this share
-          budgetRemaining -= shareAmt;
-          try { await markSharePaid(expense.id, share.memberId, hash); } catch { /* non-fatal */ }
-          if (budgetRemaining < 0.0000001) break outer;
+      for (const share of coveredShares) {
+        try {
+          await markSharePaid(share.expenseId, share.memberId, hash);
+        } catch {
+          // The Stellar transfer succeeded; local reconciliation can retry.
         }
       }
 
@@ -155,7 +168,11 @@ function NetPaymentRow({
       const isRejected = /reject|denied|cancel/i.test(msg);
       toastError(
         isRejected ? "Transaction cancelled" : "Payment failed",
-        isRejected ? "You rejected the payment in Freighter." : msg,
+        // Vetted before display: a settlement failure can surface a raw PostgREST
+        // or RPC message, which must not be shown to the user verbatim.
+        isRejected
+          ? "You rejected the payment in Freighter."
+          : userFacingMessage(err).message,
       );
       setRowState({ status: "idle" });
     }

@@ -14,6 +14,7 @@ import {
 } from "@/lib/supabase/session";
 import { useWalletContext } from "./WalletContext";
 import { getWalletScopedKey, LS_PUBLIC_KEY, LS_USER } from "@/lib/utils/constants";
+import { parseUserRow } from "@/lib/supabase/rowGuards";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -51,14 +52,15 @@ AuthContext.displayName = "AuthContext";
 
 // ─── Helper: Convert DB row to User ───────────────────────────────────────────
 
-function dbRowToUser(row: any): User {
+function dbRowToUser(row: unknown): User {
+  const parsed = parseUserRow(row);
   return {
-    id: row.id,
-    walletAddress: row.wallet_address,
-    displayName: row.display_name,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    lastLoginAt: row.last_login_at,
+    id: parsed.id,
+    walletAddress: parsed.walletAddress,
+    displayName: parsed.displayName,
+    createdAt: parsed.createdAt,
+    updatedAt: parsed.updatedAt,
+    lastLoginAt: parsed.lastLoginAt,
   };
 }
 
@@ -157,9 +159,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // readable only by an authenticated wallet. This prompts the wallet to
       // sign once per session, not once per page load.
       const client = await getAuthenticatedClient(wallet).catch((err: unknown) => {
-        setSessionError(
-          err instanceof Error ? err.message : "Could not verify your wallet."
-        );
+        // Displayed in the UI, so it is vetted first: a handshake failure can
+        // carry a 503 body or transport text rather than anything a user can act
+        // on. The full error goes to the reporter.
+        reportError("auth.session_handshake_failed", err);
+        setSessionError(userFacingMessage(err).message);
         return null;
       });
 
@@ -237,7 +241,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
             throw new Error("Cannot connect to the server. Please check your internet connection.");
           } else {
-            throw new Error(error.message || "Failed to create account. Please try again.");
+            // The branches above translate the cases we know about. Anything
+            // else is raw PostgREST text (schema names, policy details), so it
+            // is logged rather than shown — see lib/errors/userMessage.
+            reportError("auth.signup_failed", error, {
+              fields: supabaseErrorFields(error),
+            });
+            throw new Error("Failed to create account. Please try again.");
           }
         }
 
@@ -284,7 +294,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
           throw new Error("Cannot connect to server. Please check your internet connection.");
         }
-        throw new Error(error.message || "Sign in failed");
+        reportError("auth.signin_failed", error, { fields: supabaseErrorFields(error) });
+        throw new Error("Sign in failed. Please try again.");
       }
 
       if (data) {
@@ -347,7 +358,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           .single();
 
         if (error) {
-          throw new Error(error.message || "Failed to update profile");
+          reportError("auth.profile_update_failed", error, {
+            fields: supabaseErrorFields(error),
+          });
+          throw new Error("Failed to update profile. Please try again.");
         }
 
         if (data) {

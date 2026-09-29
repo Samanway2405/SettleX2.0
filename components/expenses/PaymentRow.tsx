@@ -39,6 +39,7 @@ export function PaymentRow({
   payerWalletAddress,
 }: PaymentRowProps) {
   const [showReceipt, setShowReceipt] = useState(false);
+  const { isNetworkCompatible } = useWallet();
   const explorerUrl = share.walletAddress
     ? `${STELLAR_EXPLORER}/account/${share.walletAddress}`
     : null;
@@ -161,7 +162,7 @@ export function PaymentRow({
                 recipientName={share.name}
                 onClick={() => onPay?.(share)}
                 isLoading={isPaying}
-                disabled={!share.walletAddress || !onPay}
+                disabled={!share.walletAddress || !onPay || !isNetworkCompatible}
                 size="sm"
               />
             ) : (

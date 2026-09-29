@@ -10,23 +10,25 @@ import {
   RefreshCw,
   LogOut,
   ExternalLink,
-  AlertCircle,
 } from "lucide-react";
 import { useWallet } from "@/hooks/useWallet";
 import { Spinner } from "@/components/ui/Spinner";
 import { formatAddress, formatXLM } from "@/lib/utils";
-import { STELLAR_EXPLORER } from "@/lib/utils/constants";
+import { STELLAR_EXPLORER, type StellarNetwork } from "@/lib/utils/constants";
 import { cn } from "@/lib/utils";
 
 // ─── Network badge colour ─────────────────────────────────────────────────────
 
-function NetworkBadge({ network }: { network: string | null }) {
+function NetworkBadge({ network }: { network: StellarNetwork | null }) {
   const isMainnet = network === "PUBLIC";
+  const isUnverified = network === null;
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md",
-        isMainnet
+        isUnverified
+          ? "bg-[#FEF2F2] text-[#991B1B]"
+          : isMainnet
           ? "bg-blue-100 text-blue-600"
           : "bg-[#B9FF66]/20 text-[#2D6600]"
       )}
@@ -34,10 +36,14 @@ function NetworkBadge({ network }: { network: string | null }) {
       <span
         className={cn(
           "w-1 h-1 rounded-full",
-          isMainnet ? "bg-blue-600" : "bg-[#2D6600] animate-pulse"
+          isUnverified
+            ? "bg-[#DC2626]"
+            : isMainnet
+              ? "bg-blue-600"
+              : "bg-[#2D6600] animate-pulse"
         )}
       />
-      {isMainnet ? "Mainnet" : "Testnet"}
+      {isUnverified ? "Unverified" : isMainnet ? "Mainnet" : "Testnet"}
     </span>
   );
 }
@@ -47,7 +53,7 @@ function NetworkBadge({ network }: { network: string | null }) {
 interface WalletDropdownProps {
   publicKey: string;
   balance: string | null;
-  network: string | null;
+  network: StellarNetwork | null;
   isLoadingBalance: boolean;
   onRefreshBalance: () => void;
   onDisconnect: () => void;
@@ -195,7 +201,6 @@ export function ConnectWalletButton({
   } = useWallet();
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [freighterMissing, setFreighterMissing] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Close dropdown on outside click
@@ -208,35 +213,6 @@ export function ConnectWalletButton({
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
-
-  // Check Freighter on mount
-  useEffect(() => {
-    import("@/lib/freighter").then(({ isFreighterInstalled }) => {
-      isFreighterInstalled().then((installed) => {
-        if (!installed) setFreighterMissing(true);
-      });
-    });
-  }, []);
-
-  // ── Not installed ──────────────────────────────────────────────────────────
-
-  if (freighterMissing && !isConnected) {
-    return (
-      <a
-        href="https://freighter.app"
-        target="_blank"
-        rel="noopener noreferrer"
-        className={cn(
-          "inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold",
-          "bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-100 transition-colors",
-          className
-        )}
-      >
-        <AlertCircle size={14} />
-        Install Freighter
-      </a>
-    );
-  }
 
   // ── Connected ──────────────────────────────────────────────────────────────
 

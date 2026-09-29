@@ -8,8 +8,15 @@ import { signXDR } from "@/lib/freighter";
 import { useWallet } from "@/hooks/useWallet";
 import { useExpense } from "@/hooks/useExpense";
 import { useToast } from "@/components/ui/Toast";
-import { NETWORK_PASSPHRASE, STELLAR_EXPLORER, CONTRACT_ID } from "@/lib/utils/constants";
+import {
+  NETWORK_PASSPHRASE,
+  STELLAR_EXPLORER,
+  CONTRACT_ID,
+  stellarNetworkLabel,
+} from "@/lib/utils/constants";
 import { formatXLM } from "@/lib/utils";
+import { countMetric, reportError } from "@/lib/observability/logger";
+import { userFacingMessage } from "@/lib/errors/userMessage";
 import type { SplitShare } from "@/types/expense";
 
 type OnChainStep = "simulating" | "signing" | "sending" | "confirming";
@@ -46,7 +53,12 @@ interface PendingOnChainRecord {
 }
 
 export function usePayment({ expenseId }: UsePaymentOpts) {
-  const { publicKey, refreshBalance } = useWallet();
+  const {
+    publicKey,
+    refreshBalance,
+    refreshNetwork,
+    expectedNetwork,
+  } = useWallet();
   const { markSharePaid } = useExpense();
   const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
 
@@ -58,8 +70,22 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
     setPendingOnChain(null);
   }, []);
 
+  const hasCurrentPaymentNetwork = useCallback(async (action: "paying" | "retrying") => {
+    const liveNetwork = await refreshNetwork();
+    if (liveNetwork === expectedNetwork) return true;
+
+    toastError(
+      "Payment blocked",
+      liveNetwork
+        ? `Switch your wallet to ${stellarNetworkLabel(expectedNetwork)} before ${action}.`
+        : `SettleX could not verify your wallet is on ${stellarNetworkLabel(expectedNetwork)}.`,
+    );
+    return false;
+  }, [expectedNetwork, refreshNetwork, toastError]);
+
   const retryOnChainRecord = useCallback(async () => {
     if (!pendingOnChain) return;
+    if (!(await hasCurrentPaymentNetwork("retrying"))) return;
 
     setPaymentState({ status: "recording", step: "simulating" });
     const contractResult = await recordPaymentOnChain({
@@ -69,6 +95,10 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
 
     if (!contractResult.success) {
       const msg = contractResult.error ?? "On-chain retry failed.";
+      countMetric("payment.partial_success", { stage: "retry_record" });
+      reportError("payment.onchain_retry_failed", msg, {
+        fields: { expenseId: pendingOnChain.expenseId, txHash: pendingOnChain.txHash },
+      });
       setPaymentState({
         status: "partial_success",
         hash: pendingOnChain.txHash,
@@ -88,14 +118,21 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
       onChain: true,
     });
     toastSuccess("On-chain record recovered", "Payment is now confirmed in the contract.");
-  }, [pendingOnChain, toastError, toastSuccess]);
+  }, [
+    hasCurrentPaymentNetwork,
+    pendingOnChain,
+    toastError,
+    toastSuccess,
+  ]);
 
   const payShare = useCallback(
     async ({ share, expenseTitle, payerWalletAddress, tripId }: PayShareParams) => {
+      await reconcile();
       if (!publicKey) {
-        toastError("Wallet not connected", "Please connect your Freighter wallet first.");
+        toastError("Wallet not connected", "Please connect your Stellar wallet first.");
         return;
       }
+      if (!(await hasCurrentPaymentNetwork("paying"))) return;
       if (!share.walletAddress) {
         toastError("No wallet address", `${share.name} doesn't have a Stellar address.`);
         return;
@@ -168,6 +205,12 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
         await markSharePaid(expenseId, share.memberId, result.hash);
 
         if (onChainError) {
+          // Money moved but the contract has no record of it — the divergence
+          // that most needs counting, and the exact number the issue asks for.
+          countMetric("payment.partial_success", { stage: "record" });
+          reportError("payment.onchain_record_failed", onChainError, {
+            fields: { expenseId, tripId, txHash: result.hash, ledger: result.ledger },
+          });
           setPaymentState({
             status: "partial_success",
             hash: result.hash,
@@ -184,6 +227,8 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
           return;
         }
 
+        // Counted so partial_success has a denominator — a rate, not a raw count.
+        countMetric("payment.success", { onChain });
         setPaymentState({ status: "success", hash: result.hash, ledger: result.ledger, onChain });
         toastSuccess(
           `Paid ${formatXLM(share.amount)} XLM to ${share.name}`,
@@ -197,13 +242,37 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
       } catch (err) {
         const message    = err instanceof Error ? err.message : "Payment failed. Please try again.";
         const isRejected = /reject|denied|cancel/i.test(message.toLowerCase());
-        const display    = isRejected ? "Transaction cancelled in wallet." : message;
+        // Same reason as app/error.tsx: a failure mid-payment can be a raw
+        // PostgREST or RPC error, and this string is rendered straight into the
+        // payment panel. Vetted messages (wallet and contract errors are written
+        // for users) still show; anything internal becomes the generic line.
+        const display    = isRejected
+          ? "Transaction cancelled in wallet."
+          : userFacingMessage(err).message;
+
+        // A user declining in their wallet is normal traffic, not a fault; it is
+        // counted but not reported, so it cannot drown the real failures.
+        if (isRejected) {
+          countMetric("payment.rejected_in_wallet");
+        } else {
+          countMetric("payment.failed");
+          reportError("payment.failed", err, { fields: { expenseId, tripId } });
+        }
 
         setPaymentState({ status: "error", message: display });
         toastError("Payment failed", display);
       }
     },
-    [publicKey, expenseId, markSharePaid, refreshBalance, toastSuccess, toastError, toastInfo],
+    [
+      publicKey,
+      hasCurrentPaymentNetwork,
+      expenseId,
+      markSharePaid,
+      refreshBalance,
+      toastSuccess,
+      toastError,
+      toastInfo,
+    ],
   );
 
   return {
@@ -222,4 +291,3 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
       : null,
   };
 }
-

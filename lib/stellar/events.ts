@@ -1,6 +1,7 @@
 import { rpc, xdr, scValToNative, nativeToScVal } from "@stellar/stellar-sdk";
 import { sorobanServer } from "./soroban";
 import { CONTRACT_ID } from "@/lib/utils/constants";
+import { logWarn } from "@/lib/observability/logger";
 import type { ContractPaymentEvent } from "@/types/contract";
 
 const LOOKBACK_LEDGERS = 600;
@@ -113,7 +114,12 @@ export async function fetchContractEvents(
 
     return { events, latestLedger };
   } catch (err) {
-    console.warn("[SettleX] fetchContractEvents error:", err);
+    // Rethrown for the caller to handle; logged here because this is the layer
+    // that knows the RPC call failed, and a sustained spike means the Soroban
+    // RPC is down.
+    logWarn("contract.fetch_events_failed", {
+      fields: { error: err instanceof Error ? err.message : String(err) },
+    });
     throw err;
   }
 }

@@ -1,5 +1,7 @@
+export type StellarNetwork = "TESTNET" | "PUBLIC";
+
 export const STELLAR_NETWORK =
-  (process.env.NEXT_PUBLIC_STELLAR_NETWORK as "TESTNET" | "PUBLIC") ?? "TESTNET";
+  (process.env.NEXT_PUBLIC_STELLAR_NETWORK as StellarNetwork) ?? "TESTNET";
 
 export const HORIZON_URL =
   process.env.NEXT_PUBLIC_HORIZON_URL ?? "https://horizon-testnet.stellar.org";
@@ -12,6 +14,33 @@ export const NETWORK_PASSPHRASE =
   STELLAR_NETWORK === "PUBLIC"
     ? "Public Global Stellar Network ; September 2015"
     : "Test SDF Network ; September 2015";
+
+/** Normalizes wallet labels and passphrases without guessing a default. */
+export function normalizeStellarNetwork(value: unknown): StellarNetwork | null {
+  if (typeof value !== "string") return null;
+
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === "public" ||
+    normalized === "mainnet" ||
+    normalized === "pubnet" ||
+    normalized === "public global stellar network ; september 2015"
+  ) {
+    return "PUBLIC";
+  }
+  if (
+    normalized === "testnet" ||
+    normalized === "test" ||
+    normalized === "test sdf network ; september 2015"
+  ) {
+    return "TESTNET";
+  }
+  return null;
+}
+
+export function stellarNetworkLabel(network: StellarNetwork): string {
+  return network === "PUBLIC" ? "Mainnet" : "Testnet";
+}
 
 export const MEMO_PREFIX        = "SettleX";
 export const TX_BASE_FEE        = 100;

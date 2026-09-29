@@ -66,6 +66,12 @@ jobs:
             console.log('Passed Supabase DB function search_path lint.');
           "
 
+      - name: Validate Supabase SQL Syntax
+        run: |
+          docker run --name pg-lint -e POSTGRES_PASSWORD=postgres -d postgres
+          sleep 5
+          docker exec -i pg-lint psql -U postgres -v ON_ERROR_STOP=1 -f - < supabase-setup.sql
+
       - name: Test with coverage gate
         run: npm run test:coverage -- --runInBand
 
@@ -86,10 +92,29 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Install Stellar CLI
+        run: curl -fsSL https://github.com/stellar/stellar-cli/raw/main/install.sh | sh
+
       - name: Run contract tests
         working-directory: contract
         run: cargo test
 
       - name: Build contract for WASM
-        working-directory: contract
-        run: cargo build --target wasm32-unknown-unknown --release
+        run: |
+          rustup target add wasm32v1-none
+          stellar contract build --manifest-path contract/Cargo.toml
+
+      - name: Check WASM size
+        run: |
+          WASM_FILE=$(find target -name "*.wasm" | head -n 1)
+          if [ -z "$WASM_FILE" ]; then
+            echo "Error: WASM file not found!"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$WASM_FILE")
+          MAX_SIZE=131072
+          echo "WASM size: $SIZE bytes"
+          if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+            echo "Error: WASM size exceeds the deployment size limit of $MAX_SIZE bytes."
+            exit 1
+          fi

@@ -13,8 +13,17 @@ jobs:
     timeout-minutes: 20
 
     env:
+      # Every variable the app needs in production, public and secret alike.
+      # The authoritative list lives in lib/config/requirements.ts; a value
+      # missing from this block is reported by the check step below rather than
+      # discovered by the first user who tries to sign in.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      NEXT_PUBLIC_CONTRACT_ID: ${{ secrets.NEXT_PUBLIC_CONTRACT_ID }}
+      NEXT_PUBLIC_SITE_URL: ${{ secrets.NEXT_PUBLIC_SITE_URL }}
+      SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
+      AUTH_CHALLENGE_SECRET: ${{ secrets.AUTH_CHALLENGE_SECRET }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
     steps:
       - name: Checkout
@@ -29,25 +38,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Checks every variable in lib/config/requirements.ts — the same list
+      # /api/health reports on — so this job cannot pass while the deployment it
+      # validates is unable to serve a sign-in.
       - name: Fail fast on missing required secrets
-        shell: bash
-        run: |
-          missing=0
-
-          if [ -z "$NEXT_PUBLIC_SUPABASE_URL" ]; then
-            echo "::error::Missing secret NEXT_PUBLIC_SUPABASE_URL"
-            missing=1
-          fi
-
-          if [ -z "$NEXT_PUBLIC_SUPABASE_ANON_KEY" ]; then
-            echo "::error::Missing secret NEXT_PUBLIC_SUPABASE_ANON_KEY"
-            missing=1
-          fi
-
-          if [ "$missing" -ne 0 ]; then
-            echo "One or more required secrets are missing."
-            exit 1
-          fi
+        run: node scripts/check-production-config.js
 
       - name: Type check
         run: npx tsc --noEmit
@@ -60,3 +55,46 @@ jobs:
 
       - name: Build with production-like env
         run: npm run build
+
+      # The step above proves the app *builds*. This one proves the built app
+      # comes up and reports itself configured — catching what a static secret
+      # check cannot: a value present at build time but not at runtime, and the
+      # boot-time assertion in instrumentation.ts refusing to start.
+      - name: Verify the built app reports itself healthy
+        run: |
+          npm run start -- --port 3000 &
+          server_pid=$!
+
+          # Stop the server on any exit path so the job never hangs on it.
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail --max-time 5 http://127.0.0.1:3000/api/health; then
+              echo ""
+              echo "Health endpoint reports the deployment is configured."
+              exit 0
+            fi
+
+            # A 503 from /api/health is a real answer, not a cold start: the app
+            # is up and telling us it is misconfigured. Fail now with its report
+            # rather than retrying for another 30 seconds.
+            status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+              --max-time 5 http://127.0.0.1:3000/api/health || true)
+            if [ "$status" = "503" ]; then
+              echo "::error::The built app reports itself misconfigured:"
+              curl --silent http://127.0.0.1:3000/api/health
+              exit 1
+            fi
+
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "::error::The server exited before becoming healthy. A failed \
+          boot-time config assertion (instrumentation.ts) looks like this."
+              exit 1
+            fi
+
+            echo "Waiting for the server to accept connections (attempt $attempt/30)..."
+            sleep 2
+          done
+
+          echo "::error::The server never became healthy within 60s."
+          exit 1
