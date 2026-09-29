@@ -174,21 +174,27 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // read. A switch mid-session must not leave the app acting as the old account
   // while the wallet signs as the new one.
 
+  const reconcile = useCallback(async () => {
+    if (!publicKey) return;
+    const liveKey = await getWalletsKit()
+      .getAddressSilently()
+      .catch(() => null);
+
+    if (!liveKey || liveKey === publicKey) return;
+
+    clearStoredWallet(publicKey);
+    setPublicKey(null);
+    setBalance(null);
+    setNetwork(null);
+    setSelectedWalletId(null);
+    toastInfo(
+      "Wallet account changed",
+      "Please reconnect to continue with your current account."
+    );
+  }, [publicKey, toastInfo]);
+
   useEffect(() => {
     if (!publicKey) return;
-
-    let cancelled = false;
-
-    const reconcile = async () => {
-      const walletId = (selectedWalletId ?? FREIGHTER_ID) as WalletId;
-      const kit = getWalletsKit();
-      kit.setWallet(walletId);
-      const [liveKey] = await Promise.all([
-        kit.getAddressSilently().catch(() => null),
-        checkWalletNetwork(walletId, false),
-      ]);
-
-      if (cancelled || !liveKey || liveKey === publicKey) return;
 
       clearStoredWallet(publicKey);
       setPublicKey(null);
@@ -202,15 +208,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       );
     };
 
-    const interval = setInterval(reconcile, 5_000);
+    timeoutId = setTimeout(tick, 5_000);
+
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") void reconcile();
+      if (document.visibilityState === "visible") {
+        clearTimeout(timeoutId);
+        void reconcile();
+        timeoutId = setTimeout(tick, 5_000);
+      }
     };
     document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
-      cancelled = true;
-      clearInterval(interval);
+      clearTimeout(timeoutId);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [checkWalletNetwork, publicKey, selectedWalletId, toastInfo]);
@@ -352,6 +362,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     refreshBalance,
     refreshNetwork,
     clearError,
+    reconcile,
   };
 
   return (

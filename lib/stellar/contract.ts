@@ -25,6 +25,8 @@ import { ContractErrorCode, PoolErrorCode } from "@/types/contract";
 const SOROBAN_BASE_FEE  = "1000";
 const MAX_POLL_ATTEMPTS  = 20;
 const POLL_INTERVAL_MS   = 2500;
+const PAYMENT_EXPENSE_PAGE_SIZE = 50;
+const MAX_PAYMENT_PAGES = 1000;
 
 export function decodeContractError(raw: string): string {
   const match = raw.match(/Error\(Contract,\s*#(\d+)\)/);
@@ -81,6 +83,10 @@ export function decodeContractError(raw: string): string {
         return "This expense has not been settled on-chain yet.";
       case ContractErrorCode.Unauthorized:
         return "Authorization failed for this operation.";
+      case ContractErrorCode.InvalidPage:
+        return "Payment history page size is invalid.";
+      case ContractErrorCode.IndexOverflow:
+        return "Payment history index is full.";
       default:
         return `Contract error #${code}.`;
     }
@@ -266,29 +272,7 @@ export async function getContractPayments(
     const account  = await loadAccount(callerPublicKey);
     const contract = new Contract(CONTRACT_ID);
 
-    const tx = new TransactionBuilder(account, {
-      fee:              SOROBAN_BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASE,
-    })
-      .addOperation(
-        contract.call("get_payments", nativeToScVal(tripId, { type: "string" }))
-      )
-      .setTimeout(30)
-      .build();
-
-    const simResult = await sorobanServer.simulateTransaction(tx);
-
-    if (
-      rpc.Api.isSimulationError(simResult) ||
-      !rpc.Api.isSimulationSuccess(simResult)
-    ) {
-      throw new Error("Simulation failed when reading trip payments.");
-    }
-
-    const retval = simResult.result?.retval;
-    if (!retval) return { payments: [], success: true };
-
-    const rawPayments = scValToNative(retval) as Array<{
+    type RawPayment = {
       expense_id: string;
       payer: string;
       member: string;
@@ -297,7 +281,56 @@ export async function getContractPayments(
       timestamp: bigint;
       attested?: boolean;
       voided?: boolean;
-    }>;
+    };
+    type RawPaymentPage = {
+      payments: RawPayment[];
+      next_offset?: number | bigint | null;
+    };
+
+    const rawPayments: RawPayment[] = [];
+    let offset = 0;
+
+    for (let pageNumber = 0; pageNumber < MAX_PAYMENT_PAGES; pageNumber += 1) {
+      const tx = new TransactionBuilder(account, {
+        fee:              SOROBAN_BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          contract.call(
+            "get_payments",
+            nativeToScVal(tripId, { type: "string" }),
+            nativeToScVal(offset, { type: "u32" }),
+            nativeToScVal(PAYMENT_EXPENSE_PAGE_SIZE, { type: "u32" }),
+          )
+        )
+        .setTimeout(30)
+        .build();
+
+      const simResult = await sorobanServer.simulateTransaction(tx);
+      if (
+        rpc.Api.isSimulationError(simResult) ||
+        !rpc.Api.isSimulationSuccess(simResult)
+      ) {
+        throw new Error("Simulation failed when reading trip payments.");
+      }
+
+      const retval = simResult.result?.retval;
+      if (!retval) break;
+
+      const page = scValToNative(retval) as RawPaymentPage;
+      rawPayments.push(...page.payments);
+
+      if (page.next_offset == null) break;
+      const nextOffset = Number(page.next_offset);
+      if (!Number.isSafeInteger(nextOffset) || nextOffset <= offset) {
+        throw new Error("Contract returned an invalid payment history cursor.");
+      }
+      offset = nextOffset;
+
+      if (pageNumber === MAX_PAYMENT_PAGES - 1) {
+        throw new Error("Payment history exceeded the client pagination limit.");
+      }
+    }
 
     const payments: ContractPaymentRecord[] = rawPayments.map((r) => ({
       tripId:        tripId,

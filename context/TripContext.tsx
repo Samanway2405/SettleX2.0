@@ -21,6 +21,8 @@ import type {
 } from "@supabase/supabase-js";
 import { useWalletContext } from "./WalletContext";
 import { parseTripRow } from "@/lib/supabase/rowGuards";
+import { logWarn, reportError } from "@/lib/observability/logger";
+import { supabaseErrorFields } from "@/lib/observability/supabaseError";
 
 
 /**
@@ -60,22 +62,22 @@ TripContext.displayName = "TripContext";
 
 function isRowForWallet(row: any, walletAddress: string | null): boolean {
   if (!walletAddress) return false;
+  return (
+    row?.created_by_wallet === walletAddress ||
+    (Array.isArray(row?.member_wallets) &&
+      row.member_wallets.includes(walletAddress) &&
+      Array.isArray(row?.accepted_wallets) &&
+      row.accepted_wallets.includes(walletAddress))
+  );
+}
 
-  const memberWallets = new Set<string>();
-  const rowMembers = Array.isArray(row?.members) ? row.members : [];
-  const rowMemberWallets = Array.isArray(row?.member_wallets) ? row.member_wallets : [];
-
-  for (const member of rowMembers) {
-    if (member?.walletAddress) memberWallets.add(member.walletAddress);
-  }
-
-  for (const wallet of rowMemberWallets) {
-    if (wallet) memberWallets.add(wallet);
-  }
-
-  if (row?.created_by_wallet) memberWallets.add(row.created_by_wallet);
-
-  return memberWallets.has(walletAddress);
+function isCachedTripForWallet(trip: Trip, walletAddress: string | null): boolean {
+  if (!walletAddress) return false;
+  return (
+    trip.createdByWallet === walletAddress ||
+    (!!trip.memberWallets?.includes(walletAddress) &&
+      !!trip.acceptedWallets?.includes(walletAddress))
+  );
 }
 
 function dbRowToTrip(row: unknown): Trip {
@@ -101,6 +103,7 @@ function tripToDbInsertRow(trip: Trip, creatorWallet: string) {
     settled: trip.settled,
     created_by_wallet: creatorWallet,
     member_wallets: allMemberWallets,
+    accepted_wallets: [creatorWallet],
   };
 }
 
@@ -109,19 +112,26 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [client, setClient] = useState<SupabaseClient | null>(null);
-  const { publicKey } = useWalletContext();
+  const { publicKey, reconcile } = useWalletContext();
 
   // Every call is scoped by a JWT the server issues only after the wallet has
   // signed a challenge, so RLS has a wallet identity it can actually trust.
   const getClient = useCallback(async () => {
     if (!publicKey) throw new Error("Wallet not connected");
+    await reconcile();
     return requireAuthenticatedClient(publicKey);
-  }, [publicKey]);
+  }, [publicKey, reconcile]);
 
   // Rebind whenever the session is established or dropped, so a re-signed
   // session never leaves this provider holding a client with a stale token.
   const [sessionGeneration, setSessionGeneration] = useState(0);
+  const [consentGeneration, setConsentGeneration] = useState(0);
   useEffect(() => onSessionChange(() => setSessionGeneration((n) => n + 1)), []);
+  useEffect(() => {
+    const refresh = () => setConsentGeneration((n) => n + 1);
+    window.addEventListener("settlex:consent-changed", refresh);
+    return () => window.removeEventListener("settlex:consent-changed", refresh);
+  }, []);
 
   // Resolve the authenticated client once per wallet so the initial load and
   // the realtime feed share it. Concurrent callers reuse a single handshake,
@@ -171,7 +181,10 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
         }
         try {
           const raw = localStorage.getItem(cacheKey);
-          if (raw && isMounted) setTrips(JSON.parse(raw) as Trip[]);
+          if (raw && isMounted) {
+            const cached = JSON.parse(raw) as Trip[];
+            setTrips(cached.filter((trip) => isCachedTripForWallet(trip, publicKey)));
+          }
         } catch {
           // ignore
         }
@@ -197,7 +210,8 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
         try {
           const raw = localStorage.getItem(cacheKey);
           if (raw && isMounted) {
-            setTrips(JSON.parse(raw) as Trip[]);
+            const cached = JSON.parse(raw) as Trip[];
+            setTrips(cached.filter((trip) => isCachedTripForWallet(trip, publicKey)));
           }
         } catch {
           // ignore
@@ -214,7 +228,7 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
     return () => {
       isMounted = false;
     };
-  }, [client, publicKey]);
+  }, [client, publicKey, consentGeneration]);
 
 
   // Realtime authorizes on the socket's own JWT, so the feed has to run on the
@@ -231,7 +245,15 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
         { event: "INSERT", schema: "public", table: "trips" },
         (payload: RealtimePostgresChangesPayload<any>) => {
           const row = payload.new;
-          if (!row || !isRowForWallet(row, publicKey)) return;
+          if (!row) return;
+          if (!isRowForWallet(row, publicKey)) {
+            setTrips((prev) => {
+              const updated = prev.filter((trip) => trip.id !== row.id);
+              localStorage.setItem(cacheKey, JSON.stringify(updated));
+              return updated;
+            });
+            return;
+          }
           const newTrip = dbRowToTrip(row);
           setTrips((prev) => {
             if (prev.some((t) => t.id === newTrip.id)) return prev;
@@ -288,8 +310,21 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
 
     const cacheKey = getWalletScopedKey(LS_TRIPS, publicKey);
 
+    const memberWallets = trip.members
+      .map((member) => member.walletAddress)
+      .filter((address): address is string => !!address);
+    const allMemberWallets = memberWallets.includes(publicKey)
+      ? memberWallets
+      : [publicKey, ...memberWallets];
+    const localTrip: Trip = {
+      ...trip,
+      createdByWallet: publicKey,
+      memberWallets: allMemberWallets,
+      acceptedWallets: [publicKey],
+    };
+
     setTrips((prev) => {
-      const updated = [trip, ...prev];
+      const updated = [localTrip, ...prev];
       localStorage.setItem(cacheKey, JSON.stringify(updated));
       return updated;
     });

@@ -148,6 +148,7 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
 
   const payShare = useCallback(
     async ({ share, expenseTitle, payerWalletAddress, tripId }: PayShareParams) => {
+      await reconcile();
       if (!publicKey) {
         toastError("Wallet not connected", "Please connect your Stellar wallet first.");
         return;

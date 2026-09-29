@@ -29,6 +29,7 @@ export interface WalletActions {
   refreshBalance: () => Promise<void>;
   refreshNetwork: () => Promise<StellarNetwork | null>;
   clearError: () => void;
+  reconcile: () => Promise<void>;
 }
 
 export type WalletContextType = WalletState & WalletActions;

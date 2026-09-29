@@ -23,6 +23,8 @@ pub enum ContractError {
     TxHashTooLong      = 10,
     NotPaid            = 11,
     Unauthorized       = 12,
+    InvalidPage        = 13,
+    IndexOverflow      = 14,
 }
 
 #[contracttype]
@@ -62,6 +64,15 @@ pub struct PaymentRecord {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct PaymentPage {
+    pub payments:    Vec<PaymentRecord>,
+    /// Expense-index offset for the next page, or None when this is the last
+    /// page. The cursor advances by expense shards rather than payment count.
+    pub next_offset: Option<u32>,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct PaymentEventV1 {
     pub version:     u32,
     pub expense_id:  String,
@@ -84,9 +95,14 @@ pub struct PoolConfigEventV1 {
 
 #[contracttype]
 pub enum DataKey {
-    /// Tracks the set of expense IDs that have at least one recorded payment for a trip.
-    /// This keeps the trip-level index bounded while payment history stays keyed by expense.
+    /// Legacy v2 index. New writes migrate it once and then remove it.
     TripExpenseIds(String),
+    /// Number of indexed expense shards for a trip.
+    TripExpenseCount(String),
+    /// One bounded index entry. A page reads at most MAX_PAGE_SIZE of these.
+    TripExpenseAt(String, u32),
+    /// O(1) membership marker, storing the expense's index.
+    TripExpenseIndex(String, String),
     /// Payments for a specific trip and expense; prevents one huge ledger vector from
     /// accumulating across the entire trip.
     ExpensePayments(String, String),
@@ -111,6 +127,7 @@ const MIN_MIGRATABLE_VERSION:  u32 = 1;
 const MAX_ID_LEN:             u32 = 64;
 const MAX_TX_HASH_LEN:        u32 = 128;
 const MAX_AMOUNT_STROOPS:     i128 = 10_000_000_000_000_000;
+const MAX_PAGE_SIZE:          u32 = 50;
 
 #[contract]
 pub struct SettleXContract;
@@ -243,6 +260,59 @@ impl SettleXContract {
             .unwrap_or_else(|| panic_with_error!(env, ContractError::NotInitialized));
         admin.require_auth();
         admin
+    }
+
+    /// Converts the legacy per-trip vector once, on the first post-upgrade
+    /// write. New trips simply receive an empty counter. Keeping migration on
+    /// a write is intentional: simulated read calls cannot persist it.
+    fn ensure_trip_expense_index(env: &Env, trip_id: &String) {
+        let count_key = DataKey::TripExpenseCount(trip_id.clone());
+        if env.storage().persistent().has(&count_key) {
+            return;
+        }
+
+        let legacy_key = DataKey::TripExpenseIds(trip_id.clone());
+        let legacy_expenses: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut count = 0_u32;
+
+        for expense_id in legacy_expenses.iter() {
+            let marker_key =
+                DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
+            if env.storage().persistent().has(&marker_key) {
+                continue;
+            }
+
+            let entry_key = DataKey::TripExpenseAt(trip_id.clone(), count);
+            env.storage().persistent().set(&entry_key, &expense_id);
+            env.storage().persistent().set(&marker_key, &count);
+            env.storage().persistent().extend_ttl(
+                &entry_key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
+            env.storage().persistent().extend_ttl(
+                &marker_key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
+            count = count
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(env, ContractError::IndexOverflow));
+        }
+
+        env.storage().persistent().set(&count_key, &count);
+        env.storage().persistent().extend_ttl(
+            &count_key,
+            STORAGE_BUMP_THRESHOLD,
+            STORAGE_BUMP_AMOUNT,
+        );
+        if env.storage().persistent().has(&legacy_key) {
+            env.storage().persistent().remove(&legacy_key);
+        }
     }
 
     /// Configures the off-chain verifier that must co-sign `record_payment`.
@@ -424,25 +494,32 @@ impl SettleXContract {
             .persistent()
             .extend_ttl(&expense_key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
-        let trip_expenses_key = DataKey::TripExpenseIds(trip_id.clone());
-        let mut trip_expenses: Vec<String> = env
-            .storage()
-            .persistent()
-            .get(&trip_expenses_key)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut already_indexed = false;
-        for existing in trip_expenses.iter() {
-            if existing == expense_id {
-                already_indexed = true;
-                break;
-            }
+        Self::ensure_trip_expense_index(&env, &trip_id);
+        let count_key = DataKey::TripExpenseCount(trip_id.clone());
+        let marker_key =
+            DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
+        let expense_index: u32;
+
+        if let Some(existing_index) = env.storage().persistent().get(&marker_key) {
+            expense_index = existing_index;
+        } else {
+            let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+            expense_index = count;
+            let next_count = count
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::IndexOverflow));
+            env.storage().persistent().set(&marker_key, &expense_index);
+            env.storage().persistent().set(&count_key, &next_count);
         }
-        if !already_indexed {
-            trip_expenses.push_back(expense_id.clone());
-            env.storage().persistent().set(&trip_expenses_key, &trip_expenses);
-            env.storage()
-                .persistent()
-                .extend_ttl(&trip_expenses_key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+
+        let entry_key = DataKey::TripExpenseAt(trip_id.clone(), expense_index);
+        env.storage().persistent().set(&entry_key, &expense_id);
+        for index_key in [&count_key, &marker_key, &entry_key] {
+            env.storage().persistent().extend_ttl(
+                index_key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
         }
 
         env.storage().persistent().set(&paid_key, &true);
@@ -467,34 +544,95 @@ impl SettleXContract {
         );
     }
 
-    /// Reading a trip's history also renews it.
+    /// Returns one bounded page of expense shards and renews only the keys that
+    /// page touched. offset and limit are expense-index positions, not payment
+    /// counts; next_offset is therefore the only cursor callers should follow.
     ///
     /// Only `record_payment` used to bump these keys, so a trip that is read
     /// often but written rarely could have its entries archived once the bump
     /// window elapsed -- leaving the history unreadable until someone paid a
     /// restore fee. Extending on read keeps live data live, the same way
     /// `pool::balance_of` does.
-    pub fn get_payments(env: Env, trip_id: String) -> Vec<PaymentRecord> {
-        let trip_expenses_key = DataKey::TripExpenseIds(trip_id.clone());
-        let trip_expenses: Vec<String> = env
-            .storage()
-            .persistent()
-            .get(&trip_expenses_key)
-            .unwrap_or_else(|| Vec::new(&env));
+    pub fn get_payments(
+        env: Env,
+        trip_id: String,
+        offset: u32,
+        limit: u32,
+    ) -> PaymentPage {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            panic_with_error!(&env, ContractError::InvalidPage);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
-        // `extend_ttl` traps on a key that does not exist, so every bump here is
-        // guarded by the presence check that precedes it. A trip with no
-        // payments is an ordinary empty read, not an error.
-        if env.storage().persistent().has(&trip_expenses_key) {
+        let mut expense_ids = Vec::new(&env);
+        let mut next_offset = None;
+        let count_key = DataKey::TripExpenseCount(trip_id.clone());
+
+        if let Some(count) = env.storage().persistent().get::<_, u32>(&count_key) {
             env.storage().persistent().extend_ttl(
-                &trip_expenses_key,
+                &count_key,
                 STORAGE_BUMP_THRESHOLD,
                 STORAGE_BUMP_AMOUNT,
             );
+            let end = offset.saturating_add(limit).min(count);
+            let mut index = offset.min(count);
+            while index < end {
+                let entry_key = DataKey::TripExpenseAt(trip_id.clone(), index);
+                if let Some(expense_id) =
+                    env.storage().persistent().get::<_, String>(&entry_key)
+                {
+                    env.storage().persistent().extend_ttl(
+                        &entry_key,
+                        STORAGE_BUMP_THRESHOLD,
+                        STORAGE_BUMP_AMOUNT,
+                    );
+                    let marker_key =
+                        DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
+                    if env.storage().persistent().has(&marker_key) {
+                        env.storage().persistent().extend_ttl(
+                            &marker_key,
+                            STORAGE_BUMP_THRESHOLD,
+                            STORAGE_BUMP_AMOUNT,
+                        );
+                    }
+                    expense_ids.push_back(expense_id);
+                }
+                index += 1;
+            }
+            if end < count {
+                next_offset = Some(end);
+            }
+        } else {
+            // Read-only compatibility for v2 trips. The next payment write
+            // converts this vector once and removes it.
+            let legacy_key = DataKey::TripExpenseIds(trip_id.clone());
+            if let Some(legacy_expenses) =
+                env.storage().persistent().get::<_, Vec<String>>(&legacy_key)
+            {
+                env.storage().persistent().extend_ttl(
+                    &legacy_key,
+                    STORAGE_BUMP_THRESHOLD,
+                    STORAGE_BUMP_AMOUNT,
+                );
+                let count = legacy_expenses.len();
+                let end = offset.saturating_add(limit).min(count);
+                let mut index = offset.min(count);
+                while index < end {
+                    if let Some(expense_id) = legacy_expenses.get(index) {
+                        expense_ids.push_back(expense_id);
+                    }
+                    index += 1;
+                }
+                if end < count {
+                    next_offset = Some(end);
+                }
+            }
         }
 
         let mut payments = Vec::new(&env);
-        for expense_id in trip_expenses.iter() {
+        for expense_id in expense_ids.iter() {
             let key = DataKey::ExpensePayments(trip_id.clone(), expense_id.clone());
             let expense_payments: Vec<PaymentRecord> = env
                 .storage()
@@ -522,7 +660,10 @@ impl SettleXContract {
             }
         }
 
-        payments
+        PaymentPage {
+            payments,
+            next_offset,
+        }
     }
 
     /// Checking a member's paid status also renews the record.
@@ -531,6 +672,9 @@ impl SettleXContract {
     /// once a trip winds down -- could be archived, and the UI would then show
     /// an already-settled share as unpaid.
     pub fn is_paid(env: Env, expense_id: String, member: Address) -> bool {
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
         let key = DataKey::ExpensePaid(expense_id, member);
         let paid = env.storage().persistent().has(&key);
 
@@ -549,21 +693,24 @@ mod test {
     use super::*;
     use crate::pool::{SettlementPoolContract, SettlementPoolContractClient};
     use soroban_sdk::{
-        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
         Address, Env, IntoVal, String,
     };
 
     macro_rules! setup {
         ($env:ident, $client:ident, $pool_client:ident) => {
+            setup!($env, $client, $pool_client, _settlement_contract_id);
+        };
+        ($env:ident, $client:ident, $pool_client:ident, $contract_id:ident) => {
             let $env = Env::default();
             $env.mock_all_auths();
-            let settlement_contract_id = $env.register_contract(None, SettleXContract);
+            let $contract_id = $env.register_contract(None, SettleXContract);
             let pool_contract_id = $env.register_contract(None, SettlementPoolContract);
-            let $client = SettleXContractClient::new(&$env, &settlement_contract_id);
+            let $client = SettleXContractClient::new(&$env, &$contract_id);
             let $pool_client = SettlementPoolContractClient::new(&$env, &pool_contract_id);
 
             let admin = Address::generate(&$env);
-            let settlement_address = settlement_contract_id.clone();
+            let settlement_address = $contract_id.clone();
             let pool_address = pool_contract_id.clone();
 
             $pool_client.init_pool(&admin, &settlement_address);
@@ -610,7 +757,7 @@ mod test {
 
         // History is preserved rather than rewritten — both attempts remain
         // visible for audit.
-        let payments = client.get_payments(&trip_id);
+        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
         assert_eq!(payments.len(), 2);
         assert_eq!(payments.get(1).unwrap().tx_hash, real_hash);
     }
@@ -686,13 +833,13 @@ mod test {
             &String::from_str(&env, "bogus-hash"),
         );
 
-        let before = client.get_payments(&trip_id);
+        let before = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
         assert_eq!(before.len(), 1);
         assert!(!before.get(0).unwrap().voided);
 
         client.clear_paid(&expense_id, &member);
 
-        let after = client.get_payments(&trip_id);
+        let after = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
         // The audit trail is preserved ...
         assert_eq!(after.len(), 1, "cleared records stay in history");
         // ... but no longer reads as a legitimate payment.
@@ -728,7 +875,7 @@ mod test {
 
         client.clear_paid(&expense_id, &member_a);
 
-        let payments = client.get_payments(&trip_id);
+        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
         assert_eq!(payments.len(), 2);
         for p in payments.iter() {
             if p.member == member_a {
@@ -765,7 +912,7 @@ mod test {
             &String::from_str(&env, "real-hash"),
         );
 
-        let payments = client.get_payments(&trip_id);
+        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
         assert_eq!(payments.len(), 2, "both attempts stay in the audit trail");
         // Neither reads as voided: the marker was consumed by the re-record, so
         // the legitimate replacement stands on its own.
@@ -799,7 +946,7 @@ mod test {
             &String::from_str(&env, "unverified1"),
         );
 
-        let rec = client.get_payments(&trip_id).get(0).unwrap();
+        let rec = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.get(0).unwrap();
         assert!(
             !rec.attested,
             "a record nothing verified must not claim to be attested",
@@ -861,7 +1008,7 @@ mod test {
 
         client.record_payment(&trip_id, &expense_id, &payer, &member, &amount, &tx_hash);
 
-        let rec = client.get_payments(&trip_id).get(0).unwrap();
+        let rec = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.get(0).unwrap();
         assert!(rec.attested, "an attestor-cosigned record must be marked attested");
     }
 
@@ -983,7 +1130,7 @@ mod test {
             &1_000_000_i128,
             &String::from_str(&env, "afterclear1"),
         );
-        assert!(!client.get_payments(&trip_id).get(0).unwrap().attested);
+        assert!(!client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.get(0).unwrap().attested);
     }
 
     #[test]
@@ -1047,7 +1194,7 @@ mod test {
         pool_client.deposit(&member, &10_000_000_i128);
 
         assert!(!client.is_paid(&expense_id, &member));
-        assert_eq!(client.get_payments(&trip_id).len(), 0);
+        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 0);
 
         client.record_payment(
             &trip_id, &expense_id, &payer, &member,
@@ -1057,7 +1204,7 @@ mod test {
 
         assert!(client.is_paid(&expense_id, &member));
 
-        let payments = client.get_payments(&trip_id);
+        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
         assert_eq!(payments.len(), 1);
         let rec = payments.get(0).unwrap();
         assert_eq!(rec.amount,     10_000_000_i128);
@@ -1084,7 +1231,7 @@ mod test {
 
         assert!(client.is_paid(&expense_id, &member_a));
         assert!(client.is_paid(&expense_id, &member_b));
-        assert_eq!(client.get_payments(&trip_id).len(), 2);
+        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 2);
     }
 
     #[test]
@@ -1106,7 +1253,7 @@ mod test {
 
         assert!(client.is_paid(&exp_1, &member));
         assert!(client.is_paid(&exp_2, &member));
-        assert_eq!(client.get_payments(&trip_id).len(), 2);
+        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 2);
     }
 
     #[test]
@@ -1126,7 +1273,7 @@ mod test {
         client.record_payment(&trip_id, &exp_1, &payer, &member, &3_000_000_i128, &tx_1);
         client.record_payment(&trip_id, &exp_2, &payer, &member, &4_500_000_i128, &tx_2);
 
-        let payments = client.get_payments(&trip_id);
+        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
         assert_eq!(payments.len(), 2);
 
         let mut seen_expenses = soroban_sdk::Vec::new(&env);
@@ -1138,6 +1285,167 @@ mod test {
         assert_eq!(seen_expenses.len(), 2);
         assert!((seen_expenses.get(0).unwrap() == exp_1 && seen_expenses.get(1).unwrap() == exp_2)
             || (seen_expenses.get(0).unwrap() == exp_2 && seen_expenses.get(1).unwrap() == exp_1));
+    }
+
+    #[test]
+    fn test_trip_expense_index_uses_bounded_entries_and_pages() {
+        setup!(env, client, pool_client, settlement_contract_id);
+
+        let trip_id = String::from_str(&env, "trip-paged");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        pool_client.deposit(&member, &30_000_000_i128);
+
+        for index in 0..3 {
+            let expense_id = String::from_str(
+                &env,
+                if index == 0 {
+                    "expense-a"
+                } else if index == 1 {
+                    "expense-b"
+                } else {
+                    "expense-c"
+                },
+            );
+            let tx_hash = String::from_str(
+                &env,
+                if index == 0 {
+                    "hash-a"
+                } else if index == 1 {
+                    "hash-b"
+                } else {
+                    "hash-c"
+                },
+            );
+            client.record_payment(
+                &trip_id,
+                &expense_id,
+                &payer,
+                &member,
+                &1_000_000_i128,
+                &tx_hash,
+            );
+        }
+
+        let first = client.get_payments(&trip_id, &0_u32, &2_u32);
+        assert_eq!(first.payments.len(), 2);
+        assert_eq!(first.next_offset, Some(2));
+
+        let second = client.get_payments(&trip_id, &first.next_offset.unwrap(), &2_u32);
+        assert_eq!(second.payments.len(), 1);
+        assert_eq!(second.next_offset, None);
+
+        env.as_contract(&settlement_contract_id, || {
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TripExpenseCount(trip_id.clone()))
+                .unwrap();
+            assert_eq!(count, 3);
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&DataKey::TripExpenseIds(trip_id.clone())));
+            for index in 0..count {
+                assert!(env
+                    .storage()
+                    .persistent()
+                    .has(&DataKey::TripExpenseAt(trip_id.clone(), index)));
+            }
+        });
+    }
+
+    #[test]
+    fn test_multiple_payments_for_one_expense_create_one_index_entry() {
+        setup!(env, client, pool_client, settlement_contract_id);
+
+        let trip_id = String::from_str(&env, "trip-one-shard");
+        let expense_id = String::from_str(&env, "expense-shared");
+        let payer = Address::generate(&env);
+        let member_a = Address::generate(&env);
+        let member_b = Address::generate(&env);
+        pool_client.deposit(&member_a, &10_000_000_i128);
+        pool_client.deposit(&member_b, &10_000_000_i128);
+
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member_a,
+            &1_000_000_i128,
+            &String::from_str(&env, "hash-member-a"),
+        );
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member_b,
+            &1_000_000_i128,
+            &String::from_str(&env, "hash-member-b"),
+        );
+
+        let page = client.get_payments(&trip_id, &0_u32, &1_u32);
+        assert_eq!(page.payments.len(), 2);
+        assert_eq!(page.next_offset, None);
+
+        env.as_contract(&settlement_contract_id, || {
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TripExpenseCount(trip_id.clone()))
+                .unwrap();
+            assert_eq!(count, 1);
+        });
+    }
+
+    #[test]
+    fn test_record_payment_migrates_legacy_trip_index_once() {
+        setup!(env, client, pool_client, settlement_contract_id);
+
+        let trip_id = String::from_str(&env, "trip-legacy");
+        let old_expense = String::from_str(&env, "expense-old");
+        let new_expense = String::from_str(&env, "expense-new");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        pool_client.deposit(&member, &10_000_000_i128);
+
+        env.as_contract(&settlement_contract_id, || {
+            let mut legacy = Vec::new(&env);
+            legacy.push_back(old_expense.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::TripExpenseIds(trip_id.clone()), &legacy);
+        });
+
+        client.record_payment(
+            &trip_id,
+            &new_expense,
+            &payer,
+            &member,
+            &1_000_000_i128,
+            &String::from_str(&env, "hash-new"),
+        );
+
+        env.as_contract(&settlement_contract_id, || {
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TripExpenseCount(trip_id.clone()))
+                .unwrap();
+            assert_eq!(count, 2);
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&DataKey::TripExpenseIds(trip_id.clone())));
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_payments_rejects_unbounded_page_size() {
+        setup!(env, client, _pool_client);
+        let trip_id = String::from_str(&env, "trip-page-too-large");
+        client.get_payments(&trip_id, &0_u32, &(MAX_PAGE_SIZE + 1));
     }
 
     #[test]
@@ -1235,7 +1543,7 @@ mod test {
         for _ in 0..3 {
             advance_ledgers(&env, STORAGE_BUMP_AMOUNT - 1);
             assert_eq!(
-                client.get_payments(&trip_id).len(),
+                client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(),
                 1,
                 "history should survive as long as it keeps being read",
             );
@@ -1292,7 +1600,7 @@ mod test {
         let _ = &pool_client;
 
         let trip_id = String::from_str(&env, "trip-that-never-existed");
-        assert_eq!(client.get_payments(&trip_id).len(), 0);
+        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 0);
     }
 
     #[test]
@@ -1310,7 +1618,7 @@ mod test {
         setup!(env, client, _pool_client);
 
         let trip_id = String::from_str(&env, "trip-ghost");
-        assert_eq!(client.get_payments(&trip_id).len(), 0);
+        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 0);
     }
 
 
