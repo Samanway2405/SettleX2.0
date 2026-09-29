@@ -29,6 +29,7 @@ import { Spinner } from "@/components/ui/Spinner";
 import { formatAddress, formatXLM } from "@/lib/utils";
 import { xlmToStroops, stroopsToXlm } from "@/lib/split/calculator";
 import type { Expense } from "@/types/expense";
+import { PendingInvitations } from "@/components/dashboard/PendingInvitations";
 
 // ─── Not-connected view ───────────────────────────────────────────────────────
 
@@ -252,6 +253,8 @@ function DashboardView() {
             </div>
           </div>
         </motion.div>
+
+        <PendingInvitations />
 
         {/* ── Stats row ── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">

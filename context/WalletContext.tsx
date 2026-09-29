@@ -8,17 +8,22 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { getFreighterNetwork, isFreighterInstalled } from "@/lib/freighter";
+import { isFreighterInstalled } from "@/lib/freighter";
 import { getWalletsKit, FREIGHTER_ID, type WalletId } from "@/lib/stellar/walletsKit";
 import { getXLMBalance } from "@/lib/stellar/getBalance";
 import {
   clearAppCaches,
   LS_PUBLIC_KEY,
   LS_WALLET_ID,
+  STELLAR_NETWORK,
+  stellarNetworkLabel,
+  type StellarNetwork,
 } from "@/lib/utils/constants";
 import { clearWalletSession } from "@/lib/supabase/session";
-import type { WalletContextType } from "@/types/wallet";
+import type { WalletContextType, WalletNetworkStatus } from "@/types/wallet";
 import { useToast } from "@/components/ui/Toast";
+import { reportError } from "@/lib/observability/logger";
+import { userFacingMessage } from "@/lib/errors/userMessage";
 
 
 const WalletContext = createContext<WalletContextType | null>(null);
@@ -44,7 +49,8 @@ function clearStoredWallet(walletAddress?: string | null) {
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [publicKey, setPublicKey]           = useState<string | null>(null);
   const [balance, setBalance]               = useState<string | null>(null);
-  const [network, setNetwork]               = useState<string | null>(null);
+  const [network, setNetwork]               = useState<StellarNetwork | null>(null);
+  const [networkStatus, setNetworkStatus]   = useState<WalletNetworkStatus>("idle");
   const [isConnecting, setIsConnecting]     = useState(false);
   const [isLoadingBalance, setLoadingBal]   = useState(false);
   const [isHydrated, setIsHydrated]         = useState(false);
@@ -67,12 +73,24 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const hydrateNetwork = useCallback(async () => {
+  const checkWalletNetwork = useCallback(async (
+    walletId: WalletId,
+    showChecking = true,
+  ): Promise<StellarNetwork | null> => {
+    if (showChecking) setNetworkStatus("checking");
     try {
-      const net = await getFreighterNetwork();
+      const kit = getWalletsKit();
+      kit.setWallet(walletId);
+      const net = await kit.getNetworkFromWallet();
       setNetwork(net);
+      setNetworkStatus(net === STELLAR_NETWORK ? "matched" : "mismatched");
+      return net;
     } catch {
-      setNetwork("TESTNET");
+      // Do not replace a failed wallet read with the app default. That would
+      // turn "unknown" into a false match and allow a transaction to proceed.
+      setNetwork(null);
+      setNetworkStatus("unavailable");
+      return null;
     }
   }, []);
 
@@ -140,7 +158,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setPublicKey(restoredKey);
       setSelectedWalletId(walletId);
       fetchBalance(restoredKey);
-      hydrateNetwork();
+      void checkWalletNetwork(walletId);
       setIsHydrated(true);
     }
 
@@ -149,29 +167,40 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       clearStoredWallet();
       setIsHydrated(true);
     });
-  }, [fetchBalance, hydrateNetwork, toastInfo]);
+  }, [checkWalletNetwork, fetchBalance, toastInfo]);
 
   // ── Detect account switches while the tab is open ──────────────────────────
   // Extensions do not emit a standard account-change event, so poll the silent
   // read. A switch mid-session must not leave the app acting as the old account
   // while the wallet signs as the new one.
 
+  const reconcile = useCallback(async () => {
+    if (!publicKey) return;
+    const liveKey = await getWalletsKit()
+      .getAddressSilently()
+      .catch(() => null);
+
+    if (!liveKey || liveKey === publicKey) return;
+
+    clearStoredWallet(publicKey);
+    setPublicKey(null);
+    setBalance(null);
+    setNetwork(null);
+    setSelectedWalletId(null);
+    toastInfo(
+      "Wallet account changed",
+      "Please reconnect to continue with your current account."
+    );
+  }, [publicKey, toastInfo]);
+
   useEffect(() => {
     if (!publicKey) return;
-
-    let cancelled = false;
-
-    const reconcile = async () => {
-      const liveKey = await getWalletsKit()
-        .getAddressSilently()
-        .catch(() => null);
-
-      if (cancelled || !liveKey || liveKey === publicKey) return;
 
       clearStoredWallet(publicKey);
       setPublicKey(null);
       setBalance(null);
       setNetwork(null);
+      setNetworkStatus("idle");
       setSelectedWalletId(null);
       toastInfo(
         "Wallet account changed",
@@ -179,18 +208,22 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       );
     };
 
-    const interval = setInterval(reconcile, 5_000);
+    timeoutId = setTimeout(tick, 5_000);
+
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") void reconcile();
+      if (document.visibilityState === "visible") {
+        clearTimeout(timeoutId);
+        void reconcile();
+        timeoutId = setTimeout(tick, 5_000);
+      }
     };
     document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
-      cancelled = true;
-      clearInterval(interval);
+      clearTimeout(timeoutId);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [publicKey, toastInfo]);
+  }, [checkWalletNetwork, publicKey, selectedWalletId, toastInfo]);
 
   useEffect(() => {
     if (!publicKey) return;
@@ -241,38 +274,54 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
       if (walletError || !resolvedAddress) return;
 
-      const net = await getFreighterNetwork().catch(() => "TESTNET");
+      const net = await checkWalletNetwork(chosenWalletId);
 
       setPublicKey(resolvedAddress);
-      setNetwork(net);
       setSelectedWalletId(chosenWalletId);
       localStorage.setItem(LS_PUBLIC_KEY, resolvedAddress);
       localStorage.setItem(LS_WALLET_ID, chosenWalletId);
       toastSuccess(
         "Wallet connected",
-        `${resolvedAddress.slice(0, 6)}…${resolvedAddress.slice(-4)} on ${net === "PUBLIC" ? "Mainnet" : "Testnet"}`
+        net
+          ? `${resolvedAddress.slice(0, 6)}…${resolvedAddress.slice(-4)} on ${stellarNetworkLabel(net)}`
+          : `${resolvedAddress.slice(0, 6)}…${resolvedAddress.slice(-4)} · network not verified`,
       );
+      if (net !== STELLAR_NETWORK) {
+        toastError(
+          net ? "Wrong Stellar network" : "Wallet network unavailable",
+          net
+            ? `Switch your wallet to ${stellarNetworkLabel(STELLAR_NETWORK)} before making a payment.`
+            : "SettleX could not verify this wallet's network. Payments remain blocked.",
+        );
+      }
 
       fetchBalance(resolvedAddress);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to connect wallet.";
+      // Matched against the raw text: the wallet extensions' own cancellation
+      // wording is what identifies a user backing out, and that is not shown.
       const isCancelled =
         msg.toLowerCase().includes("cancel") ||
         msg.toLowerCase().includes("closed without");
       if (!isCancelled) {
-        setError(msg);
-        toastError("Connection failed", msg);
+        // Vetted before display — a connect failure can surface extension
+        // internals or transport text.
+        const display = userFacingMessage(err).message;
+        reportError("wallet.connect_failed", err);
+        setError(display);
+        toastError("Connection failed", display);
       }
     } finally {
       setIsConnecting(false);
     }
-  }, [fetchBalance]);
+  }, [checkWalletNetwork, fetchBalance, toastError, toastSuccess]);
 
 
   const disconnect = useCallback(() => {
     setPublicKey(null);
     setBalance(null);
     setNetwork(null);
+    setNetworkStatus("idle");
     setError(null);
     setSelectedWalletId(null);
     toastInfo("Wallet disconnected");
@@ -287,12 +336,21 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     await fetchBalance(publicKey);
   }, [publicKey, fetchBalance]);
 
+  const refreshNetwork = useCallback(async () => {
+    if (!selectedWalletId) return null;
+    return checkWalletNetwork(selectedWalletId as WalletId);
+  }, [checkWalletNetwork, selectedWalletId]);
+
   const clearError = useCallback(() => setError(null), []);
 
   const value: WalletContextType = {
     publicKey,
     balance,
     network,
+    expectedNetwork: STELLAR_NETWORK,
+    networkStatus,
+    isNetworkCompatible: isConnected && networkStatus === "matched",
+    networkMismatch: isConnected && networkStatus === "mismatched",
     isConnected,
     isConnecting,
     isHydrated,
@@ -302,7 +360,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     connect,
     disconnect,
     refreshBalance,
+    refreshNetwork,
     clearError,
+    reconcile,
   };
 
   return (

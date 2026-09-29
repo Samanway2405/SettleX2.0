@@ -13,6 +13,10 @@ describe("decodeContractError", () => {
     [ContractErrorCode.AmountTooLarge, "Amount is above the allowed limit."],
     [ContractErrorCode.VersionMismatch, "Contract storage version mismatch."],
     [ContractErrorCode.TxHashTooLong, "Transaction hash is too long."],
+    [ContractErrorCode.NotPaid, "This expense has not been settled on-chain yet."],
+    [ContractErrorCode.Unauthorized, "Authorization failed for this operation."],
+    [ContractErrorCode.InvalidPage, "Payment history page size is invalid."],
+    [ContractErrorCode.IndexOverflow, "Payment history index is full."],
     [PoolErrorCode.AlreadyInitialized, "Pool is already initialized."],
     [PoolErrorCode.NotInitialized, "Pool contract is not initialized yet."],
     [PoolErrorCode.Unauthorized, "Pool authorization failed."],
@@ -29,6 +33,10 @@ describe("decodeContractError", () => {
   it("falls back to numbered generic message for unknown codes", () => {
     const result = decodeContractError("Error(Contract, #99)");
     expect(result).toBe("Contract error #99.");
+  });
+
+  it("falls back to a pool-specific message for unknown codes at or above 100", () => {
+    expect(decodeContractError("Error(Contract, #199)")).toBe("Pool error #199.");
   });
 
   it("returns raw message when pattern is not a contract error", () => {

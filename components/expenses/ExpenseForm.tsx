@@ -10,6 +10,18 @@ import { useExpense } from "@/hooks/useExpense";
 import { useToast } from "@/components/ui/Toast";
 import type { Expense, ExpenseFormData, Member, SplitMode } from "@/types/expense";
 
+const MIN_SPLIT_WEIGHT = 1;
+const MAX_SPLIT_WEIGHT = 1000;
+
+function isValidSplitWeight(weight: number | undefined): weight is number {
+  return (
+    typeof weight === "number" &&
+    Number.isInteger(weight) &&
+    weight >= MIN_SPLIT_WEIGHT &&
+    weight <= MAX_SPLIT_WEIGHT
+  );
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function blankMember(): Member {
@@ -121,10 +133,42 @@ export function ExpenseForm({
         errs[`member_addr_${i}`] = "Stellar address is required to enable payments.";
       else if (!isValidStellarAddress(m.walletAddress.trim()))
         errs[`member_addr_${i}`] = "Invalid Stellar address (must start with G, 56 chars).";
+
+      if (
+        splitMode === "custom" &&
+        !isValidSplitWeight(m.weight)
+      ) {
+        errs[`member_weight_${i}`] = `Weight must be a whole number between ${MIN_SPLIT_WEIGHT} and ${MAX_SPLIT_WEIGHT}.`;
+      }
     });
 
     const filledNames = members.filter((m) => m.name.trim());
     if (filledNames.length < 2) errs.members = "Add at least 2 members.";
+
+    const weightsAreValid = members.every((m) => isValidSplitWeight(m.weight));
+
+    if (
+      splitMode === "custom" &&
+      isValidXLMAmount(totalAmount) &&
+      filledNames.length >= 2 &&
+      weightsAreValid
+    ) {
+      try {
+        // An unmatched payer ID makes the calculator return every member's
+        // allocation, including the actual payer's share.
+        const allocations = calculateSplit(totalAmount, members, "", "custom");
+        const allocatedTotal = allocations.reduce(
+          (sum, share) => sum + xlmToStroops(share.amount),
+          0n
+        );
+
+        if (allocatedTotal !== xlmToStroops(totalAmount)) {
+          errs.members = "Custom split shares must add up to the total amount.";
+        }
+      } catch {
+        errs.members = "Unable to calculate a valid custom split.";
+      }
+    }
 
     setErrors(errs);
     return Object.keys(errs).length === 0;
@@ -309,16 +353,38 @@ export function ExpenseForm({
                       />
 
                       {splitMode === "custom" && (
-                        <input
-                          type="number"
-                          min={1}
-                          placeholder="Weight"
-                          value={member.weight ?? 1}
-                          onChange={(e) =>
-                            updateMember(member.id, { weight: Math.max(1, parseInt(e.target.value) || 1) })
-                          }
-                          className="w-full rounded-lg border border-[#E5E5E5] px-3 py-2 text-sm bg-white outline-none focus:border-[#B9FF66] focus:ring-2 focus:ring-[#B9FF66]/20 transition-all"
-                        />
+                        <div>
+                          <input
+                            type="number"
+                            min={MIN_SPLIT_WEIGHT}
+                            max={MAX_SPLIT_WEIGHT}
+                            step={1}
+                            placeholder="Weight"
+                            value={member.weight ?? ""}
+                            onChange={(e) =>
+                              updateMember(member.id, { weight: Number(e.target.value) })
+                            }
+                            aria-invalid={Boolean(errors[`member_weight_${i}`])}
+                            aria-describedby={
+                              errors[`member_weight_${i}`]
+                                ? `member-weight-error-${member.id}`
+                                : undefined
+                            }
+                            className={`w-full rounded-lg border px-3 py-2 text-sm bg-white outline-none transition-all
+                              ${errors[`member_weight_${i}`]
+                                ? "border-red-300 focus:border-red-400"
+                                : "border-[#E5E5E5] focus:border-[#B9FF66] focus:ring-2 focus:ring-[#B9FF66]/20"
+                              }`}
+                          />
+                          {errors[`member_weight_${i}`] && (
+                            <p
+                              id={`member-weight-error-${member.id}`}
+                              className="text-xs text-red-500 mt-1"
+                            >
+                              {errors[`member_weight_${i}`]}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
 

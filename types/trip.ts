@@ -7,6 +7,9 @@ export interface Trip {
   members: Member[];
   expenseIds: string[];
   createdAt: string;
+  createdByWallet?: string;
+  memberWallets?: string[];
+  acceptedWallets?: string[];
   settled: boolean;
 }
 

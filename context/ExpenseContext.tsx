@@ -20,6 +20,8 @@ import type {
   SupabaseClient,
 } from "@supabase/supabase-js";
 import { useWalletContext } from "./WalletContext";
+import { logWarn, reportError } from "@/lib/observability/logger";
+import { supabaseErrorFields } from "@/lib/observability/supabaseError";
 
 
 /**
@@ -58,22 +60,22 @@ ExpenseContext.displayName = "ExpenseContext";
 
 function isRowForWallet(row: any, walletAddress: string | null): boolean {
   if (!walletAddress) return false;
+  return (
+    row?.created_by_wallet === walletAddress ||
+    (Array.isArray(row?.member_wallets) &&
+      row.member_wallets.includes(walletAddress) &&
+      Array.isArray(row?.accepted_wallets) &&
+      row.accepted_wallets.includes(walletAddress))
+  );
+}
 
-  const memberWallets = new Set<string>();
-  const rowMembers = Array.isArray(row?.members) ? row.members : [];
-  const rowMemberWallets = Array.isArray(row?.member_wallets) ? row.member_wallets : [];
-
-  for (const member of rowMembers) {
-    if (member?.walletAddress) memberWallets.add(member.walletAddress);
-  }
-
-  for (const wallet of rowMemberWallets) {
-    if (wallet) memberWallets.add(wallet);
-  }
-
-  if (row?.created_by_wallet) memberWallets.add(row.created_by_wallet);
-
-  return memberWallets.has(walletAddress);
+function isCachedExpenseForWallet(expense: Expense, walletAddress: string | null): boolean {
+  if (!walletAddress) return false;
+  return (
+    expense.createdByWallet === walletAddress ||
+    (!!expense.memberWallets?.includes(walletAddress) &&
+      !!expense.acceptedWallets?.includes(walletAddress))
+  );
 }
 
 /**
@@ -83,21 +85,8 @@ function isRowForWallet(row: any, walletAddress: string | null): boolean {
  */
 export class ExpenseConflictError extends Error {}
 
-function dbRowToExpense(row: any): Expense {
-  return {
-    id: row.id,
-    title: row.title,
-    description: row.description ?? undefined,
-    totalAmount: row.total_amount,
-    currency: row.currency,
-    splitMode: row.split_mode,
-    paidByMemberId: row.paid_by_member_id,
-    members: row.members,
-    shares: row.shares,
-    createdAt: row.created_at,
-    settled: row.settled,
-    version: row.version ?? 1,
-  };
+function dbRowToExpense(row: unknown): Expense {
+  return parseExpenseRow(row);
 }
 
 function expenseToDbInsertRow(expense: Expense, creatorWallet: string) {
@@ -125,6 +114,7 @@ function expenseToDbInsertRow(expense: Expense, creatorWallet: string) {
     version: expense.version ?? 1,
     created_by_wallet: creatorWallet,
     member_wallets: allMemberWallets,
+    accepted_wallets: [creatorWallet],
   };
 }
 
@@ -133,19 +123,26 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [client, setClient] = useState<SupabaseClient | null>(null);
-  const { publicKey } = useWalletContext();
+  const { publicKey, reconcile } = useWalletContext();
 
   // Every call is scoped by a JWT the server issues only after the wallet has
   // signed a challenge, so RLS has a wallet identity it can actually trust.
   const getClient = useCallback(async () => {
     if (!publicKey) throw new Error("Wallet not connected");
+    await reconcile();
     return requireAuthenticatedClient(publicKey);
-  }, [publicKey]);
+  }, [publicKey, reconcile]);
 
   // Rebind whenever the session is established or dropped, so a re-signed
   // session never leaves this provider holding a client with a stale token.
   const [sessionGeneration, setSessionGeneration] = useState(0);
+  const [consentGeneration, setConsentGeneration] = useState(0);
   useEffect(() => onSessionChange(() => setSessionGeneration((n) => n + 1)), []);
+  useEffect(() => {
+    const refresh = () => setConsentGeneration((n) => n + 1);
+    window.addEventListener("settlex:consent-changed", refresh);
+    return () => window.removeEventListener("settlex:consent-changed", refresh);
+  }, []);
 
   // Resolve the authenticated client once per wallet so the initial load and
   // the realtime feed share it. Concurrent callers reuse a single handshake,
@@ -164,7 +161,9 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       })
       .catch((err) => {
         if (cancelled) return;
-        console.warn("Wallet sign-in failed — falling back to cached data:", err);
+        logWarn("expense.signin_failed_using_cache", {
+          fields: { ...supabaseErrorFields(err), error: err instanceof Error ? err.message : String(err) },
+        });
         setClient(null);
       });
 
@@ -194,7 +193,10 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
         }
         try {
           const raw = localStorage.getItem(cacheKey);
-          if (raw && isMounted) setExpenses(JSON.parse(raw) as Expense[]);
+          if (raw && isMounted) {
+            const cached = JSON.parse(raw) as Expense[];
+            setExpenses(cached.filter((expense) => isCachedExpenseForWallet(expense, publicKey)));
+          }
         } catch {
           // ignore
         }
@@ -217,10 +219,13 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
           localStorage.setItem(cacheKey, JSON.stringify(expenses));
         }
       } catch (err) {
-        console.warn("Failed to load from Supabase, using localStorage:", err);
+        logWarn("expense.load_failed_using_cache", { fields: supabaseErrorFields(err) });
         try {
           const raw = localStorage.getItem(cacheKey);
-          if (raw && isMounted) setExpenses(JSON.parse(raw) as Expense[]);
+          if (raw && isMounted) {
+            const cached = JSON.parse(raw) as Expense[];
+            setExpenses(cached.filter((expense) => isCachedExpenseForWallet(expense, publicKey)));
+          }
         } catch {
           // ignore
         }
@@ -236,7 +241,7 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
     return () => {
       isMounted = false;
     };
-  }, [client, publicKey]);
+  }, [client, publicKey, consentGeneration]);
 
   // Realtime authorizes on the socket's own JWT, so the feed has to run on the
   // authenticated client too — the anon client would receive nothing.
@@ -252,7 +257,15 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
         { event: "INSERT", schema: "public", table: "expenses" },
         (payload: RealtimePostgresChangesPayload<any>) => {
           const row = payload.new;
-          if (!row || !isRowForWallet(row, publicKey)) return;
+          if (!row) return;
+          if (!isRowForWallet(row, publicKey)) {
+            setExpenses((prev) => {
+              const updated = prev.filter((expense) => expense.id !== row.id);
+              localStorage.setItem(cacheKey, JSON.stringify(updated));
+              return updated;
+            });
+            return;
+          }
           const newExpense = dbRowToExpense(row);
           setExpenses((prev) => {
             if (prev.some((e) => e.id === newExpense.id)) return prev;
@@ -295,7 +308,9 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       )
       .subscribe((status, err) => {
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-          console.error("Expenses realtime subscription failed", { status, err });
+          // Realtime dying is silent to the user: the list simply stops
+          // updating, so it must be reported rather than printed.
+          reportError("expense.realtime_failed", err, { fields: { status } });
         }
       });
 
@@ -309,8 +324,21 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
 
     const cacheKey = getWalletScopedKey(LS_EXPENSES, publicKey);
 
+    const memberWallets = expense.members
+      .map((member) => member.walletAddress)
+      .filter((address): address is string => !!address);
+    const allMemberWallets = memberWallets.includes(publicKey)
+      ? memberWallets
+      : [publicKey, ...memberWallets];
+    const localExpense: Expense = {
+      ...expense,
+      createdByWallet: publicKey,
+      memberWallets: allMemberWallets,
+      acceptedWallets: [publicKey],
+    };
+
     setExpenses((prev) => {
-      const updated = [expense, ...prev];
+      const updated = [localExpense, ...prev];
       localStorage.setItem(cacheKey, JSON.stringify(updated));
       return updated;
     });
@@ -419,7 +447,9 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
           return synced;
         });
       } catch (err) {
-        console.error("Failed to update expense in Supabase:", err);
+        reportError("expense.update_failed", err, {
+          fields: { expenseId: id, ...supabaseErrorFields(err) },
+        });
         // A conflict already replaced local state with the winning row. Rolling
         // back to `current` here would overwrite it with the very stale copy
         // this guard exists to reject.
@@ -456,7 +486,9 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
 
         if (error) throw error;
       } catch (err) {
-        console.error("Failed to delete expense from Supabase:", err);
+        reportError("expense.delete_failed", err, {
+          fields: { expenseId: id, ...supabaseErrorFields(err) },
+        });
         // Roll back optimistic deletion on error
         setExpenses((prev) => {
           if (prev.some((e) => e.id === id)) return prev;
@@ -523,7 +555,9 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
             rpcSucceeded = true;
           }
         } catch (rpcErr) {
-          console.warn("mark_share_paid RPC failed or not installed, falling back to OCC retry:", rpcErr);
+          logWarn("expense.mark_share_paid_rpc_unavailable", {
+            fields: { expenseId, ...supabaseErrorFields(rpcErr) },
+          });
         }
 
         if (rpcSucceeded) return;
@@ -614,7 +648,11 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
 
         throw lastError || new Error("Failed to record payment due to concurrent updates. Please try again.");
       } catch (err) {
-        console.error("Failed to persist markSharePaid to Supabase:", err);
+        // The payment settled on Stellar but the database does not reflect it:
+        // the ledger and the app now disagree about who has paid.
+        reportError("expense.mark_share_paid_failed", err, {
+          fields: { expenseId, ...supabaseErrorFields(err) },
+        });
         setExpenses((prev) => {
           const rolled = prev.map((e) => (e.id === expenseId ? current : e));
           localStorage.setItem(cacheKey, JSON.stringify(rolled));

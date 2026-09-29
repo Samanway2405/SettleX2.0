@@ -29,6 +29,7 @@ export function WalletInfo({ className }: { className?: string }) {
 
   const explorerUrl = `${STELLAR_EXPLORER}/account/${publicKey}`;
   const isMainnet   = network === "PUBLIC";
+  const isUnverified = network === null;
 
   const handleCopy = () => {
     navigator.clipboard.writeText(publicKey).then(() => {
@@ -48,16 +49,28 @@ export function WalletInfo({ className }: { className?: string }) {
       <div
         className={cn(
           "flex items-center gap-2 px-4 py-2 border-b border-[#E5E5E5] text-xs font-semibold",
-          isMainnet ? "bg-blue-50 text-blue-600" : "bg-[#B9FF66]/10 text-[#2D6600]"
+          isUnverified
+            ? "bg-[#FEF2F2] text-[#991B1B]"
+            : isMainnet
+              ? "bg-blue-50 text-blue-600"
+              : "bg-[#B9FF66]/10 text-[#2D6600]"
         )}
       >
         <span
           className={cn(
             "w-1.5 h-1.5 rounded-full",
-            isMainnet ? "bg-blue-600" : "bg-[#2D6600] animate-pulse"
+            isUnverified
+              ? "bg-[#DC2626]"
+              : isMainnet
+                ? "bg-blue-600"
+                : "bg-[#2D6600] animate-pulse"
           )}
         />
-        {isMainnet ? "Stellar Mainnet" : "Stellar Testnet"}
+        {isUnverified
+          ? "Stellar network unverified"
+          : isMainnet
+            ? "Stellar Mainnet"
+            : "Stellar Testnet"}
       </div>
 
       <div className="p-4 sm:p-5">

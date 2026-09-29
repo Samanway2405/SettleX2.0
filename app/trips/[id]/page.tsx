@@ -30,6 +30,7 @@ import { PaymentStatus } from "@/components/payment/PaymentStatus";
 import { useWallet } from "@/hooks/useWallet";
 import { useAuth } from "@/context/AuthContext";
 import { useToast } from "@/components/ui/Toast";
+import { reportError } from "@/lib/observability/logger";
 import type { Expense, Member, SplitShare } from "@/types/expense";
 
 type Tab = "expenses" | "settle";
@@ -191,7 +192,9 @@ export default function TripDetailPage() {
     const linked = expenses.filter((e) => trip.expenseIds.includes(e.id));
     if (linked.length > 0 && linked.every((e) => e.settled)) {
       settleTrip(trip.id).catch((err) => {
-        console.error("Failed to auto-settle trip in database:", err);
+        // Nothing in the UI surfaces this: the trip just silently stays
+        // unsettled after its last expense was paid.
+        reportError("trip.auto_settle_failed", err, { fields: { tripId: trip.id } });
       });
     }
   }, [expenses, trip, settleTrip]);

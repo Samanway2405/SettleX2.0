@@ -31,6 +31,9 @@ export interface Expense {
   createdAt: string;
   settled: boolean;
   version?: number;
+  createdByWallet?: string;
+  memberWallets?: string[];
+  acceptedWallets?: string[];
 }
 
 export type ExpenseFormData = {

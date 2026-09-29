@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchContractEvents } from "@/lib/stellar/events";
 import type { ContractPaymentEvent } from "@/types/contract";
 import { CONTRACT_ID } from "@/lib/utils/constants";
+import { userFacingMessage } from "@/lib/errors/userMessage";
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -44,7 +45,10 @@ export function useContractEvents(tripId: string | undefined): UseContractEvents
       }
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Event fetch failed.");
+      // Rendered in the trip page's degraded-state banner, so it is vetted: a
+      // Soroban RPC failure surfaces transport text, not anything actionable.
+      // lib/stellar/events.ts already logs the underlying error.
+      setError(userFacingMessage(err).message);
     } finally {
       if (isFirst) setIsLoading(false);
     }

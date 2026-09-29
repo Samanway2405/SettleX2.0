@@ -12,6 +12,8 @@
     "test:coverage": "jest --coverage"
   },
   "dependencies": {
+    "@creit.tech/stellar-wallets-kit": "^2.7.0",
+    "@radix-ui/react-dialog": "^1.1.1",
     "@radix-ui/react-slot": "^1.1.0",
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^14.5.0",
@@ -28,6 +30,7 @@
     "tailwind-merge": "^2.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.42.0",
     "@serwist/next": "^9.0.0",
     "@testing-library/react": "^16.3.2",
     "@types/jest": "^29.5.12",

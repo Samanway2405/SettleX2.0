@@ -8,6 +8,7 @@
  * way the old `x-wallet-address` request header could.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/types/supabase";
 import {
   AUTH_REQUEST_TIMEOUT_MS,
   CHALLENGE_ENDPOINT,
@@ -482,4 +483,11 @@ export async function requireAuthenticatedClient(
   const client = await getAuthenticatedClient(walletAddress, { interactive: true });
   if (!client) throw new WalletSessionError("Wallet sign-in is required.");
   return client;
+}
+
+export function getTypedClient() {
+  return createClient<Database>(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    realtime: { params: { eventsPerSecond: 10 } },
+  });
 }
