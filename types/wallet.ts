@@ -15,6 +15,7 @@ export interface WalletActions {
   disconnect: () => void;
   refreshBalance: () => Promise<void>;
   clearError: () => void;
+  reconcile: () => Promise<void>;
 }
 
 export type WalletContextType = WalletState & WalletActions;

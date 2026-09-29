@@ -122,14 +122,15 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [client, setClient] = useState<SupabaseClient | null>(null);
-  const { publicKey } = useWalletContext();
+  const { publicKey, reconcile } = useWalletContext();
 
   // Every call is scoped by a JWT the server issues only after the wallet has
   // signed a challenge, so RLS has a wallet identity it can actually trust.
   const getClient = useCallback(async () => {
     if (!publicKey) throw new Error("Wallet not connected");
+    await reconcile();
     return requireAuthenticatedClient(publicKey);
-  }, [publicKey]);
+  }, [publicKey, reconcile]);
 
   // Rebind whenever the session is established or dropped, so a re-signed
   // session never leaves this provider holding a client with a stale token.

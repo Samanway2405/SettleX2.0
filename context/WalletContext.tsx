@@ -158,41 +158,53 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // read. A switch mid-session must not leave the app acting as the old account
   // while the wallet signs as the new one.
 
+  const reconcile = useCallback(async () => {
+    if (!publicKey) return;
+    const liveKey = await getWalletsKit()
+      .getAddressSilently()
+      .catch(() => null);
+
+    if (!liveKey || liveKey === publicKey) return;
+
+    clearStoredWallet(publicKey);
+    setPublicKey(null);
+    setBalance(null);
+    setNetwork(null);
+    setSelectedWalletId(null);
+    toastInfo(
+      "Wallet account changed",
+      "Please reconnect to continue with your current account."
+    );
+  }, [publicKey, toastInfo]);
+
   useEffect(() => {
     if (!publicKey) return;
 
-    let cancelled = false;
+    let timeoutId: NodeJS.Timeout;
 
-    const reconcile = async () => {
-      const liveKey = await getWalletsKit()
-        .getAddressSilently()
-        .catch(() => null);
-
-      if (cancelled || !liveKey || liveKey === publicKey) return;
-
-      clearStoredWallet(publicKey);
-      setPublicKey(null);
-      setBalance(null);
-      setNetwork(null);
-      setSelectedWalletId(null);
-      toastInfo(
-        "Wallet account changed",
-        "Please reconnect to continue with your current account."
-      );
+    const tick = () => {
+      void reconcile();
+      // Back off interval when the tab is hidden
+      const delay = document.visibilityState === "hidden" ? 30_000 : 5_000;
+      timeoutId = setTimeout(tick, delay);
     };
 
-    const interval = setInterval(reconcile, 5_000);
+    timeoutId = setTimeout(tick, 5_000);
+
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") void reconcile();
+      if (document.visibilityState === "visible") {
+        clearTimeout(timeoutId);
+        void reconcile();
+        timeoutId = setTimeout(tick, 5_000);
+      }
     };
     document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
-      cancelled = true;
-      clearInterval(interval);
+      clearTimeout(timeoutId);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [publicKey, toastInfo]);
+  }, [publicKey, reconcile]);
 
   useEffect(() => {
     if (!publicKey) return;
@@ -311,6 +323,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     disconnect,
     refreshBalance,
     clearError,
+    reconcile,
   };
 
   return (

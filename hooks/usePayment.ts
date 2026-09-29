@@ -48,7 +48,7 @@ interface PendingOnChainRecord {
 }
 
 export function usePayment({ expenseId }: UsePaymentOpts) {
-  const { publicKey, refreshBalance } = useWallet();
+  const { publicKey, refreshBalance, reconcile } = useWallet();
   const { markSharePaid } = useExpense();
   const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
 
@@ -119,6 +119,7 @@ export function usePayment({ expenseId }: UsePaymentOpts) {
 
   const payShare = useCallback(
     async ({ share, expenseTitle, payerWalletAddress, tripId }: PayShareParams) => {
+      await reconcile();
       if (!publicKey) {
         toastError("Wallet not connected", "Please connect your Freighter wallet first.");
         return;
