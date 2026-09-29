@@ -64,9 +64,9 @@ describe("freighter helpers", () => {
     );
   });
 
-  it("getFreighterNetwork falls back to TESTNET on error", async () => {
+  it("does not disguise a failed network read as TESTNET", async () => {
     getNetworkFromWalletMock.mockRejectedValue(new Error("boom"));
 
-    await expect(getFreighterNetwork()).resolves.toBe("TESTNET");
+    await expect(getFreighterNetwork()).rejects.toThrow("boom");
   });
 });

@@ -14,7 +14,7 @@ import { signXDR } from "@/lib/freighter";
 import { useWallet } from "@/hooks/useWallet";
 import { useExpense } from "@/hooks/useExpense";
 import { useToast } from "@/components/ui/Toast";
-import { NETWORK_PASSPHRASE } from "@/lib/utils/constants";
+import { NETWORK_PASSPHRASE, stellarNetworkLabel } from "@/lib/utils/constants";
 import { PayButton } from "@/components/payment/PayButton";
 import { TransactionHash } from "@/components/payment/TransactionHash";
 import { cn, formatXLM } from "@/lib/utils";
@@ -103,7 +103,12 @@ function NetPaymentRow({
   expenses: Expense[];
   unverifiedClaimCount?: number;
 }) {
-  const { publicKey } = useWallet();
+  const {
+    publicKey,
+    isNetworkCompatible,
+    refreshNetwork,
+    expectedNetwork,
+  } = useWallet();
   const { markSharePaid } = useExpense();
   const { success: toastSuccess, error: toastError, info: toastInfo } = useToast();
   const [rowState, setRowState] = useState<RowState>({ status: "idle" });
@@ -111,11 +116,22 @@ function NetPaymentRow({
   const canPay =
     publicKey &&
     payment.toWallet &&
+    isNetworkCompatible &&
     rowState.status === "idle" &&
     publicKey === payment.fromWallet;
 
   const handlePay = async () => {
     if (!publicKey || !payment.toWallet) return;
+    const liveNetwork = await refreshNetwork();
+    if (liveNetwork !== expectedNetwork) {
+      toastError(
+        "Payment blocked",
+        liveNetwork
+          ? `Switch your wallet to ${stellarNetworkLabel(expectedNetwork)} before paying.`
+          : `SettleX could not verify your wallet is on ${stellarNetworkLabel(expectedNetwork)}.`,
+      );
+      return;
+    }
     try {
       setRowState({ status: "paying" });
       const coveredShares = selectCoveredShares(payment, expenses);

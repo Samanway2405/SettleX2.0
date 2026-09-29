@@ -51,9 +51,5 @@ export async function signXDR(
 }
 
 export async function getFreighterNetwork(): Promise<string> {
-  try {
-    return await getWalletsKit().getNetworkFromWallet();
-  } catch {
-    return "TESTNET";
-  }
+  return getWalletsKit().getNetworkFromWallet();
 }

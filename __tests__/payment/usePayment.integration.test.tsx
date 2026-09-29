@@ -29,6 +29,7 @@ describe("usePayment integration flow", () => {
   const mockedUseToast = (jest.requireMock("@/components/ui/Toast") as { useToast: jest.Mock }).useToast;
 
   const mockRefreshBalance = jest.fn();
+  const mockRefreshNetwork = jest.fn(async () => "TESTNET");
   const mockMarkSharePaid = jest.fn(async (_expenseId: string, _memberId: string, _txHash: string) => {});
   const mockToastSuccess = jest.fn();
   const mockToastError = jest.fn();
@@ -48,6 +49,10 @@ describe("usePayment integration flow", () => {
     mockedUseWallet.mockReturnValue({
       publicKey: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       refreshBalance: mockRefreshBalance,
+      refreshNetwork: mockRefreshNetwork,
+      isNetworkCompatible: true,
+      networkStatus: "matched",
+      expectedNetwork: "TESTNET",
     });
 
     mockedUseExpense.mockReturnValue({
@@ -95,6 +100,34 @@ describe("usePayment integration flow", () => {
     expect(mockMarkSharePaid).toHaveBeenCalledWith("exp-1", "member-1", "tx-hash-123");
     expect(recordPaymentOnChain).toHaveBeenCalledTimes(1);
     expect(mockToastSuccess).toHaveBeenCalled();
+  });
+
+  it("does not build or submit a payment when the wallet network mismatches", async () => {
+    mockedUseWallet.mockReturnValue({
+      publicKey: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      refreshBalance: mockRefreshBalance,
+      refreshNetwork: jest.fn(async () => "PUBLIC"),
+      isNetworkCompatible: false,
+      networkStatus: "mismatched",
+      expectedNetwork: "TESTNET",
+    });
+    const { result } = renderHook(() => usePayment({ expenseId: "exp-network" }));
+
+    await act(async () => {
+      await result.current.payShare({
+        share,
+        expenseTitle: "Dinner",
+        payerWalletAddress: "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      });
+    });
+
+    expect(buildPaymentTransaction).not.toHaveBeenCalled();
+    expect(signXDR).not.toHaveBeenCalled();
+    expect(submitSignedTransaction).not.toHaveBeenCalled();
+    expect(mockToastError).toHaveBeenCalledWith(
+      "Payment blocked",
+      "Switch your wallet to Testnet before paying.",
+    );
   });
 
   it("supports retry when on-chain recording initially fails", async () => {

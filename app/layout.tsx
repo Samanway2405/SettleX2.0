@@ -9,6 +9,7 @@ import { TripProvider } from "@/context/TripContext";
 import { ServiceWorkerRegister } from "@/components/pwa/ServiceWorkerRegister";
 import { ObservabilityInit } from "@/components/observability/ObservabilityInit";
 import { InstallPrompt } from "@/components/pwa/InstallPrompt";
+import { NetworkGuardBanner } from "@/components/wallet/NetworkGuardBanner";
 
 const poppins = Poppins({
   subsets: ["latin"],
@@ -105,6 +106,7 @@ export default function RootLayout({
         <ObservabilityInit />
         <ToastProvider>
           <WalletProvider>
+            <NetworkGuardBanner />
             <AuthProvider>
               <ExpenseProvider>
                 <TripProvider>

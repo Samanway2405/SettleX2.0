@@ -1,3 +1,12 @@
+import type { StellarNetwork } from "@/lib/utils/constants";
+
+export type WalletNetworkStatus =
+  | "idle"
+  | "checking"
+  | "matched"
+  | "mismatched"
+  | "unavailable";
+
 export interface WalletState {
   publicKey: string | null;
   balance: string | null;
@@ -5,7 +14,11 @@ export interface WalletState {
   isConnected: boolean;
   isLoadingBalance: boolean;
   isHydrated: boolean;
-  network: string | null;
+  network: StellarNetwork | null;
+  expectedNetwork: StellarNetwork;
+  networkStatus: WalletNetworkStatus;
+  isNetworkCompatible: boolean;
+  networkMismatch: boolean;
   error: string | null;
   selectedWalletId: string | null;
 }
@@ -14,6 +27,7 @@ export interface WalletActions {
   connect: () => Promise<void>;
   disconnect: () => void;
   refreshBalance: () => Promise<void>;
+  refreshNetwork: () => Promise<StellarNetwork | null>;
   clearError: () => void;
   reconcile: () => Promise<void>;
 }
