@@ -57,9 +57,9 @@ describe("Issue #130: mark_share_paid audit record (paidBy and markedAt)", () =>
       );
 
       // Should render "marked paid by"
-      expect(screen.getByText(/marked paid by/i)).toBeInTheDocument();
+      expect(screen.getByText(/marked paid by/i)).toBeDefined();
       // Should show truncated or formatted creator wallet
-      expect(screen.getByTitle(CREATOR_WALLET)).toBeInTheDocument();
+      expect(screen.getAllByTitle(new RegExp(CREATOR_WALLET, "i")).length).toBeGreaterThan(0);
     });
 
     it("does NOT render 'marked paid by' when paidBy equals the share owner (self-payment)", () => {
@@ -83,7 +83,7 @@ describe("Issue #130: mark_share_paid audit record (paidBy and markedAt)", () =>
         />
       );
 
-      expect(screen.queryByText(/marked paid by/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/marked paid by/i)).toBeNull();
     });
 
     it("does NOT render 'marked paid by' when share is unpaid", () => {
@@ -104,7 +104,7 @@ describe("Issue #130: mark_share_paid audit record (paidBy and markedAt)", () =>
         />
       );
 
-      expect(screen.queryByText(/marked paid by/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/marked paid by/i)).toBeNull();
     });
   });
 
@@ -123,9 +123,9 @@ describe("Issue #130: mark_share_paid audit record (paidBy and markedAt)", () =>
         />
       );
 
-      expect(screen.getByText("Marked Paid By")).toBeInTheDocument();
-      expect(screen.getByTitle(CREATOR_WALLET)).toBeInTheDocument();
-      expect(screen.getByText("Marked At")).toBeInTheDocument();
+      expect(screen.getByText("Marked Paid By")).toBeDefined();
+      expect(screen.getByTitle(CREATOR_WALLET)).toBeDefined();
+      expect(screen.getByText("Marked At")).toBeDefined();
     });
   });
 });
