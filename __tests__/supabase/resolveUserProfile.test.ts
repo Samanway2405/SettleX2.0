@@ -36,3 +36,29 @@ describe("resolve_user_profile privacy boundary (Issue #128)", () => {
     );
   });
 });
+
+describe("SECURITY DEFINER function permissions (Issue #129)", () => {
+  const setupSql = fs.readFileSync(
+    path.resolve(__dirname, "../../supabase-setup.sql"),
+    "utf8",
+  );
+
+  it("does not grant execute on mark_share_paid to anon role", () => {
+    expect(setupSql).toMatch(
+      /REVOKE ALL ON FUNCTION public\.mark_share_paid\(UUID,\s*TEXT,\s*TEXT\) FROM PUBLIC, anon, authenticated;\s*GRANT EXECUTE ON FUNCTION public\.mark_share_paid\(UUID,\s*TEXT,\s*TEXT\) TO authenticated;/i,
+    );
+    expect(setupSql).not.toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.mark_share_paid\(UUID,\s*TEXT,\s*TEXT\) TO authenticated, anon/i,
+    );
+  });
+
+  it("does not grant execute on resolve_user_profile to anon role", () => {
+    expect(setupSql).toMatch(
+      /REVOKE ALL ON FUNCTION public\.resolve_user_profile\(TEXT\) FROM PUBLIC, anon, authenticated;\s*GRANT EXECUTE ON FUNCTION public\.resolve_user_profile\(TEXT\) TO authenticated;/i,
+    );
+    expect(setupSql).not.toMatch(
+      /GRANT EXECUTE ON FUNCTION public\.resolve_user_profile\(TEXT\) TO authenticated, anon/i,
+    );
+  });
+});
+

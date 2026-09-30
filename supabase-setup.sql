@@ -1636,7 +1636,8 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.mark_share_paid(UUID, TEXT, TEXT) TO authenticated, anon;
+REVOKE ALL ON FUNCTION public.mark_share_paid(UUID, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.mark_share_paid(UUID, TEXT, TEXT) TO authenticated;
 
 -- Resolve only the caller's own profile or a counterparty profile from a shared,
 -- accepted expense/trip. Stellar addresses are public, so requiring a "known"
