@@ -15,6 +15,8 @@ import {
 import { useWalletContext } from "./WalletContext";
 import { getWalletScopedKey, LS_PUBLIC_KEY, LS_USER } from "@/lib/utils/constants";
 import { parseUserRow } from "@/lib/supabase/rowGuards";
+import { useToast } from "@/components/ui/Toast";
+import { reportError } from "@/lib/observability/logger";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -39,7 +41,7 @@ interface AuthContextType {
   sessionError: string | null;
   signUp: (displayName: string) => Promise<void>;
   signIn: () => Promise<void>;
-  signOut: () => void;
+  signOut: () => Promise<void>;
   /** Re-runs the wallet signing handshake. */
   refreshSession: () => Promise<void>;
   updateProfile: (updates: Partial<Pick<User, "displayName">>) => Promise<void>;
@@ -314,16 +316,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // ── Sign out: Clear user state ──────────────────────────────────────────
 
-  const signOut = useCallback(() => {
+  const { error: toastError } = useToast();
+
+  const signOut = useCallback(async () => {
+    // Always clear locally first — the user must not be trapped in a session
+    // because of a network blip. Revocation is awaited so we can surface a
+    // warning without blocking the sign-out itself.
     setUser(null);
     clearUserCache(publicKey);
-    clearWalletSession();
     setVerifiedWallet(null);
     setSessionError(null);
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(LS_USER);
     }
-  }, [publicKey]);
+
+    const { serverRevoked } = await clearWalletSession();
+    if (!serverRevoked) {
+      reportError("auth.signout_server_revocation_failed", undefined, {
+        fields: { walletAddress: publicKey ?? undefined },
+      });
+      toastError(
+        "Signed out on this device",
+        "The server could not revoke your session — it will expire automatically.",
+      );
+    }
+  }, [publicKey, toastError]);
 
   // ── Refresh session: re-run the wallet signing handshake ──────────────────
 

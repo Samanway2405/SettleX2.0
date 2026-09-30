@@ -151,15 +151,19 @@ function storeSession(session: WalletSession): void {
  * Tells the server to revoke the current token, so it stops working everywhere
  * rather than only in this browser.
  *
- * Fire-and-forget by design: the local session is cleared either way, because a
- * user who clicked "sign out" must never be left holding a live session just
- * because the network failed. The token stays denied server-side once the call
- * lands; if it never lands, the short TTL is the backstop.
+ * The local session is cleared by the caller regardless of the outcome, because
+ * a user who clicked "sign out" must never be left holding a live session just
+ * because the network failed. The resolved boolean lets the caller surface a
+ * warning toast when the server explicitly refused — "clear locally, tell the
+ * user" are not mutually exclusive.
  */
-function revokeOnServer(session: WalletSession, everywhere: boolean): void {
+async function revokeOnServer(
+  session: WalletSession,
+  everywhere: boolean,
+): Promise<{ ok: boolean }> {
   try {
     const body = JSON.stringify({ everywhere });
-    void fetch(SIGNOUT_ENDPOINT, {
+    const response = await fetch(SIGNOUT_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -167,11 +171,11 @@ function revokeOnServer(session: WalletSession, everywhere: boolean): void {
       },
       body,
       keepalive: true,
-    }).catch(() => {
-      // Already logged out locally; nothing useful to show the user here.
     });
+    return { ok: response.ok };
   } catch {
-    // ignore
+    // Network failure: the short TTL is the backstop. Treat as non-fatal.
+    return { ok: false };
   }
 }
 
@@ -180,14 +184,23 @@ function revokeOnServer(session: WalletSession, everywhere: boolean): void {
  * call re-runs the handshake and the old token is dead rather than merely
  * forgotten.
  *
+ * Always clears locally — the user must never be left holding a live session
+ * because of a network error. Returns `{ serverRevoked: true }` when the server
+ * confirmed the revocation, `false` otherwise, so callers can surface a warning
+ * without blocking sign-out.
+ *
  * Pass `everywhere` to also deny every other token issued to this wallet.
  */
-export function clearWalletSession(options: { everywhere?: boolean } = {}): void {
+export async function clearWalletSession(
+  options: { everywhere?: boolean } = {},
+): Promise<{ serverRevoked: boolean }> {
   // After a reload the in-memory copy is gone but localStorage still holds a
   // live token — read it back, or sign-out would revoke nothing in exactly the
   // case that matters most.
   const revoking = memoizedSession ?? readAnyStoredSession();
-  if (revoking) revokeOnServer(revoking, options.everywhere === true);
+  const revocationResult = revoking
+    ? await revokeOnServer(revoking, options.everywhere === true)
+    : { ok: true };
 
   sessionEpoch += 1;
   memoizedSession = null;
@@ -204,6 +217,7 @@ export function clearWalletSession(options: { everywhere?: boolean } = {}): void
     }
   }
   notifySessionChange();
+  return { serverRevoked: revocationResult.ok };
 }
 
 let memoizedSession: WalletSession | null = null;
@@ -366,7 +380,7 @@ async function runHandshake(walletAddress: string): Promise<WalletSession> {
   // real, but nobody is waiting for it any more -- caching it would resurrect a
   // session the user just ended. Revoke it and report the handshake as void.
   if (epoch !== sessionEpoch) {
-    revokeOnServer(session, false);
+    void revokeOnServer(session, false);
     throw new WalletSessionError("Sign-in was cancelled.");
   }
 
