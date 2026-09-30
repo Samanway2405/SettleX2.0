@@ -1638,8 +1638,10 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.mark_share_paid(UUID, TEXT, TEXT) TO authenticated, anon;
 
--- Narrow helper function to resolve a specific known wallet address to its display name.
--- Authenticated only; prevents mass enumeration while allowing single lookups by address.
+-- Resolve only the caller's own profile or a counterparty profile from a shared,
+-- accepted expense/trip. Stellar addresses are public, so requiring a "known"
+-- address alone does not prevent directory enumeration. Also cap lookups per
+-- authenticated wallet; this quota is a secondary guard, not the authorization boundary.
 CREATE OR REPLACE FUNCTION public.resolve_user_profile(p_wallet_address TEXT)
 RETURNS TABLE (
     wallet_address TEXT,
@@ -1649,8 +1651,13 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
+DECLARE
+    v_caller_wallet TEXT;
+    v_allowed BOOLEAN;
+    v_retry_after INTEGER;
 BEGIN
-    IF public.settlex_wallet() IS NULL THEN
+    v_caller_wallet := public.settlex_wallet();
+    IF v_caller_wallet IS NULL THEN
         RAISE EXCEPTION 'Not authenticated';
     END IF;
 
@@ -1658,15 +1665,48 @@ BEGIN
         RETURN;
     END IF;
 
+    SELECT limit_result.allowed, limit_result.retry_after
+    INTO v_allowed, v_retry_after
+    FROM public.auth_rate_limit(
+        'profile_lookup:' || v_caller_wallet,
+        60,
+        60000
+    ) AS limit_result;
+
+    IF NOT v_allowed THEN
+        RAISE EXCEPTION 'Profile lookup rate limit exceeded; retry after % seconds', v_retry_after;
+    END IF;
+
     RETURN QUERY
     SELECT u.wallet_address, u.display_name
     FROM public.users u
     WHERE u.wallet_address = p_wallet_address
+      AND (
+          u.wallet_address = v_caller_wallet
+          OR EXISTS (
+              SELECT 1
+              FROM public.expenses e
+              WHERE v_caller_wallet = ANY(e.accepted_wallets)
+                AND u.wallet_address = ANY(e.accepted_wallets)
+                AND v_caller_wallet = ANY(e.member_wallets)
+                AND u.wallet_address = ANY(e.member_wallets)
+          )
+          OR EXISTS (
+              SELECT 1
+              FROM public.trips t
+              WHERE v_caller_wallet = ANY(t.accepted_wallets)
+                AND u.wallet_address = ANY(t.accepted_wallets)
+                AND v_caller_wallet = ANY(t.member_wallets)
+                AND u.wallet_address = ANY(t.member_wallets)
+          )
+      )
     LIMIT 1;
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.resolve_user_profile(TEXT) TO authenticated, anon;
+REVOKE ALL ON FUNCTION public.resolve_user_profile(TEXT) FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.resolve_user_profile(TEXT) TO authenticated;
 
 -- ============================================================================
 -- 5.7. AUTH SHARED STATE (Replay Guard + Rate Limiting Across Instances)
