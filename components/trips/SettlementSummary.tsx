@@ -245,6 +245,10 @@ function NetPaymentRow({
 export function SettlementSummary({ trip, expenses, onChainEvents = [] }: SettlementSummaryProps) {
   const rawDebts         = useMemo(() => deriveRawDebts(expenses, onChainEvents), [expenses, onChainEvents]);
   const unverifiedClaims = useMemo(() => deriveUnverifiedClaims(expenses, onChainEvents), [expenses, onChainEvents]);
+  const eventCounts      = useMemo(() => ({
+    attested: onChainEvents.filter((event) => event.attested === true).length,
+    selfReported: onChainEvents.filter((event) => event.attested !== true).length,
+  }), [onChainEvents]);
   const netPayments      = useMemo(() => computeNetPayments(rawDebts), [rawDebts]);
 
   if (netPayments.length === 0) {
