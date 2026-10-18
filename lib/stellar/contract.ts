@@ -15,6 +15,7 @@ import {
   HORIZON_URL,
 } from "@/lib/utils/constants";
 import { logWarn, reportError } from "@/lib/observability/logger";
+import { xlmToStroops } from "@/lib/split/calculator";
 import type {
   ContractPaymentRecord,
   GetPaymentsResult,
@@ -111,8 +112,6 @@ async function loadAccount(publicKey: string): Promise<Account> {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
-
-export { xlmToStroops, stroopsToXlm } from "@/lib/split/calculator";
 
 function contractReady(caller: string): boolean {
   if (!CONTRACT_ID) {
