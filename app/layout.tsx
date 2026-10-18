@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Poppins, JetBrains_Mono } from "next/font/google";
+import { Poppins } from "next/font/google";
 import "./globals.css";
 import { WalletProvider } from "@/context/WalletContext";
 import { AuthProvider } from "@/context/AuthContext";
@@ -16,13 +16,6 @@ const poppins = Poppins({
   subsets: ["latin"],
   weight: ["300", "400", "500", "600", "700", "800", "900"],
   variable: "--font-poppins",
-  display: "swap",
-});
-
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-  variable: "--font-jetbrains-mono",
   display: "swap",
 });
 
@@ -84,15 +77,6 @@ export const viewport: Viewport = {
   // installed PWA.
   viewportFit: "cover",
 };
-
-import { Poppins } from "next/font/google";
-
-const poppins = Poppins({
-  weight: ["300", "400", "500", "600", "700", "800", "900"],
-  subsets: ["latin"],
-  display: "swap",
-  variable: "--font-poppins",
-});
 
 export default function RootLayout({
   children,
