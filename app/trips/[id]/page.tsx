@@ -31,6 +31,8 @@ import { useWallet } from "@/hooks/useWallet";
 import { useAuth } from "@/context/AuthContext";
 import { useToast } from "@/components/ui/Toast";
 import { reportError } from "@/lib/observability/logger";
+import { formatXLM } from "@/lib/utils";
+import { stroopsToXlm, xlmToStroops } from "@/lib/split/calculator";
 import type { Expense, Member, SplitShare } from "@/types/expense";
 
 type Tab = "expenses" | "settle";
