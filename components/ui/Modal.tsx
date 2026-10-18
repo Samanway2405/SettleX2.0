@@ -93,7 +93,18 @@ export function Modal({
                 />
               </Dialog.Overlay>
 
-              <Dialog.Content asChild forceMount>
+              <Dialog.Content
+                asChild
+                forceMount
+                onCloseAutoFocus={(event) => {
+                  event.preventDefault();
+                  restoreFocus();
+                }}
+                onEscapeKeyDown={(event) => {
+                  event.preventDefault();
+                  onClose();
+                }}
+              >
                 <motion.div
                   initial={{ opacity: 0, y: 40, scale: 0.98 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -109,14 +120,6 @@ export function Modal({
                     className
                   )}
                   onClick={(e) => e.stopPropagation()}
-                  onCloseAutoFocus={(event) => {
-                    event.preventDefault();
-                    restoreFocus();
-                  }}
-                  onEscapeKeyDown={(event) => {
-                    event.preventDefault();
-                    onClose();
-                  }}
                 >
                   <div className="flex justify-center pt-3 sm:hidden">
                     <div className="w-8 h-1 rounded-full bg-[#D0D0D0]" />
