@@ -476,12 +476,52 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const client = await getClient();
-        const { error } = await client
-          .from("trips")
-          .update({ expense_ids: expenseIds })
-          .eq("id", tripId);
 
-        if (error) throw error;
+        // 1. Primary path: Call validated server-side RPC add_expense_to_trip
+        let rpcSucceeded = false;
+        try {
+          const { error: rpcErr } = await client.rpc("add_expense_to_trip", {
+            p_trip_id: tripId,
+            p_expense_id: expenseId,
+          });
+
+          if (rpcErr) {
+            const msg = rpcErr.message || "";
+            if (
+              msg.includes("Cannot link foreign expense") ||
+              msg.includes("Not authorized") ||
+              msg.includes("Invalid expense ID") ||
+              msg.includes("Cannot add expenses to a settled trip")
+            ) {
+              throw rpcErr;
+            }
+          } else {
+            rpcSucceeded = true;
+          }
+        } catch (rpcErr) {
+          const msg = (rpcErr as { message?: string })?.message || "";
+          if (
+            msg.includes("Cannot link foreign expense") ||
+            msg.includes("Not authorized") ||
+            msg.includes("Invalid expense ID") ||
+            msg.includes("Cannot add expenses to a settled trip")
+          ) {
+            throw rpcErr;
+          }
+          logWarn("trip.add_expense_rpc_unavailable", {
+            fields: { tripId, ...supabaseErrorFields(rpcErr) },
+          });
+        }
+
+        // 2. Fallback path: Direct update if RPC not present in environment
+        if (!rpcSucceeded) {
+          const { error } = await client
+            .from("trips")
+            .update({ expense_ids: expenseIds })
+            .eq("id", tripId);
+
+          if (error) throw error;
+        }
 
         if (typeof window !== "undefined") {
           window.dispatchEvent(new Event("settlex:consent-changed"));
@@ -499,7 +539,7 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
         throw err;
       }
     },
-    [trips, getClient]
+    [trips, getClient, publicKey]
   );
 
   const settleTrip = useCallback(

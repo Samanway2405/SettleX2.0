@@ -11,7 +11,8 @@
     "test": "jest",
     "test:coverage": "jest --coverage",
     "db:reset": "supabase db reset",
-    "db:test": "supabase test db"
+    "db:test": "supabase test db",
+    "types:supabase": "node scripts/generate-supabase-types.js"
   },
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.7.0",

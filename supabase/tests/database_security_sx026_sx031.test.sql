@@ -8,7 +8,7 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgtap;
 
-SELECT plan(17);
+SELECT plan(19);
 
 -- ─── SX-031: Length and Size Constraints ─────────────────────────────────────
 
@@ -258,6 +258,40 @@ SELECT throws_ok(
        WHERE id = 't0000000-0000-0000-0000-000000000001' $$,
     'Invalid expense ID in trip: must be a valid UUID',
     'SX-029: Non-UUID expense_ids rejected'
+);
+
+SELECT throws_ok(
+    $$ UPDATE public.trips
+       SET expense_ids = ARRAY['e0000000-0000-0000-0000-000000000001', 'e0000000-0000-0000-0000-000000000002']
+       WHERE id = 't0000000-0000-0000-0000-000000000001' $$,
+    'Cannot link foreign expense or expense caller does not belong to',
+    'SX-029: Foreign expense injection rejected'
+);
+
+SELECT throws_ok(
+    $$ SELECT public.add_expense_to_trip(
+           't0000000-0000-0000-0000-000000000001'::uuid,
+           'e0000000-0000-0000-0000-000000000002'::uuid
+       ) $$,
+    'Cannot link foreign expense or expense caller does not belong to',
+    'SX-029: Foreign expense via add_expense_to_trip rejected'
+);
+
+SELECT set_config('request.jwt.claims', '{"wallet_address": "GALICE11111111111111111111111111111111111111111111111111111", "iat": 1700000000}', true);
+
+SELECT lives_ok(
+    $$ UPDATE public.trips
+       SET settled = true
+       WHERE id = 't0000000-0000-0000-0000-000000000001' $$,
+    'SX-029: Settling trip with all settled expenses succeeds'
+);
+
+SELECT throws_ok(
+    $$ UPDATE public.trips
+       SET expense_ids = ARRAY['e0000000-0000-0000-0000-000000000001', 'e0000000-0000-0000-0000-000000000002']
+       WHERE id = 't0000000-0000-0000-0000-000000000001' $$,
+    'Cannot add expenses to a settled trip',
+    'SX-029: Cannot add expenses to settled trip'
 );
 
 -- ─── SX-030: Share and Version Tampering Tests ───────────────────────────────

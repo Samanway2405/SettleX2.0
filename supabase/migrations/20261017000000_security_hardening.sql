@@ -55,6 +55,37 @@ CREATE POLICY "Members can view payments for their expenses" ON public.payments
         )
     );
 
+-- ─── 1.1. TRIP_EXPENSES JOIN TABLE (SX-029) ──────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS public.trip_expenses (
+    trip_id UUID NOT NULL REFERENCES public.trips(id) ON DELETE CASCADE,
+    expense_id UUID NOT NULL REFERENCES public.expenses(id) ON DELETE CASCADE,
+    added_by_wallet TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    PRIMARY KEY (trip_id, expense_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trip_expenses_trip_id ON public.trip_expenses(trip_id);
+CREATE INDEX IF NOT EXISTS idx_trip_expenses_expense_id ON public.trip_expenses(expense_id);
+ALTER TABLE public.trip_expenses ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Members can view trip_expenses" ON public.trip_expenses;
+CREATE POLICY "Members can view trip_expenses" ON public.trip_expenses
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.trips t
+            WHERE t.id = trip_expenses.trip_id
+              AND (
+                  public.settlex_wallet() = t.created_by_wallet
+                  OR (
+                      public.settlex_wallet() = ANY(t.member_wallets)
+                      AND public.settlex_wallet() = ANY(t.accepted_wallets)
+                  )
+              )
+        )
+    );
+
 -- ─── 2. HARDENED MARK_SHARE_PAID (SX-028) ───────────────────────────────────
 
 CREATE OR REPLACE FUNCTION public.mark_share_paid(
@@ -910,6 +941,10 @@ BEGIN
 
     -- Check expense_ids modifications for ALL callers (SX-027 & SX-029)
     IF NEW.expense_ids IS DISTINCT FROM OLD.expense_ids THEN
+        IF OLD.settled = true THEN
+            RAISE EXCEPTION 'Cannot add expenses to a settled trip';
+        END IF;
+
         IF NOT (OLD.expense_ids <@ NEW.expense_ids) THEN
             RAISE EXCEPTION 'Cannot remove existing expenses from trip';
         END IF;
@@ -922,7 +957,7 @@ BEGIN
             RAISE EXCEPTION 'Invalid expense ID in trip: must be a valid UUID';
         END IF;
 
-        -- Newly appended expense ids must exist and caller must be a member of them (SX-029)
+        -- Newly appended expense ids must exist, caller must belong to them, and all expense members must be trip members (SX-029)
         IF EXISTS (
             SELECT 1 FROM pg_catalog.unnest(NEW.expense_ids) AS eid
             WHERE NOT (eid = ANY(OLD.expense_ids))
@@ -933,19 +968,38 @@ BEGIN
                         v_caller = e.created_by_wallet
                         OR (v_caller = ANY(e.member_wallets) AND v_caller = ANY(e.accepted_wallets))
                     )
+                    AND e.member_wallets <@ NEW.member_wallets
               )
         ) THEN
             RAISE EXCEPTION 'Cannot link foreign expense or expense caller does not belong to';
         END IF;
+
+        -- Keep trip_expenses join table in sync (SX-029)
+        INSERT INTO public.trip_expenses (trip_id, expense_id, added_by_wallet)
+        SELECT NEW.id, eid::UUID, v_caller
+        FROM pg_catalog.unnest(NEW.expense_ids) AS eid
+        WHERE NOT (eid = ANY(OLD.expense_ids))
+        ON CONFLICT (trip_id, expense_id) DO NOTHING;
     END IF;
 
-    -- Settled status transition check for ALL callers (SX-027)
+    -- Settled status transition check for ALL callers (SX-027 & SX-029)
     IF NEW.settled IS DISTINCT FROM OLD.settled THEN
         IF OLD.settled = true AND NEW.settled = false THEN
             RAISE EXCEPTION 'Cannot reopen a settled trip';
         END IF;
 
         IF NEW.settled = true THEN
+            IF NEW.expense_ids IS DISTINCT FROM OLD.expense_ids THEN
+                RAISE EXCEPTION 'Cannot modify expenses while settling trip';
+            END IF;
+
+            IF EXISTS (
+                SELECT 1 FROM pg_catalog.unnest(NEW.expense_ids) AS eid
+                WHERE eid !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            ) THEN
+                RAISE EXCEPTION 'Invalid expense ID in trip: must be a valid UUID';
+            END IF;
+
             IF pg_catalog.cardinality(NEW.expense_ids) > 0 THEN
                 SELECT pg_catalog.count(*)
                 INTO v_unsettled_count
@@ -1090,3 +1144,86 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.mark_share_paid(UUID, TEXT, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.resolve_user_profile(TEXT) TO authenticated;
+
+-- ─── 6. HARDENED ADD_EXPENSE_TO_TRIP (SX-029) ────────────────────────────────
+
+CREATE OR REPLACE FUNCTION public.add_expense_to_trip(
+    p_trip_id UUID,
+    p_expense_id UUID
+)
+RETURNS SETOF public.trips
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_caller TEXT;
+    v_trip public.trips%ROWTYPE;
+    v_expense public.expenses%ROWTYPE;
+BEGIN
+    v_caller := public.settlex_wallet();
+    IF v_caller IS NULL THEN
+        RAISE EXCEPTION 'Not authenticated';
+    END IF;
+
+    -- Lock trip row for update
+    SELECT * INTO v_trip
+    FROM public.trips
+    WHERE id = p_trip_id
+    FOR UPDATE;
+
+    IF v_trip.id IS NULL THEN
+        RAISE EXCEPTION 'Trip not found';
+    END IF;
+
+    IF v_trip.settled THEN
+        RAISE EXCEPTION 'Cannot add expenses to a settled trip';
+    END IF;
+
+    -- Caller must be trip creator or accepted trip member
+    IF v_caller <> v_trip.created_by_wallet
+       AND NOT (v_caller = ANY(v_trip.member_wallets) AND v_caller = ANY(v_trip.accepted_wallets)) THEN
+        RAISE EXCEPTION 'Not authorized to add expenses to this trip';
+    END IF;
+
+    -- Fetch and validate the expense
+    SELECT * INTO v_expense
+    FROM public.expenses
+    WHERE id = p_expense_id;
+
+    IF v_expense.id IS NULL THEN
+        RAISE EXCEPTION 'Expense not found';
+    END IF;
+
+    -- Caller must be expense creator or accepted expense member
+    IF v_caller <> v_expense.created_by_wallet
+       AND NOT (v_caller = ANY(v_expense.member_wallets) AND v_caller = ANY(v_expense.accepted_wallets)) THEN
+        RAISE EXCEPTION 'Cannot link foreign expense or expense caller does not belong to';
+    END IF;
+
+    -- All expense members must be members of the trip
+    IF NOT (v_expense.member_wallets <@ v_trip.member_wallets) THEN
+        RAISE EXCEPTION 'Cannot link foreign expense or expense caller does not belong to';
+    END IF;
+
+    -- Record in trip_expenses join table
+    INSERT INTO public.trip_expenses (trip_id, expense_id, added_by_wallet)
+    VALUES (p_trip_id, p_expense_id, v_caller)
+    ON CONFLICT (trip_id, expense_id) DO NOTHING;
+
+    -- Append to trip expense_ids if not already present
+    IF NOT (p_expense_id::TEXT = ANY(v_trip.expense_ids)) THEN
+        RETURN QUERY
+        UPDATE public.trips
+        SET expense_ids = pg_catalog.array_append(expense_ids, p_expense_id::TEXT),
+            updated_at = pg_catalog.now()
+        WHERE id = p_trip_id
+        RETURNING *;
+    ELSE
+        RETURN QUERY
+        SELECT * FROM public.trips WHERE id = p_trip_id;
+    END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.add_expense_to_trip(UUID, UUID) TO authenticated;
