@@ -64,7 +64,7 @@ export default function TripsPage() {
       members: data.members,
       expenseIds: [],
       createdAt: new Date().toISOString(),
-      createdByWallet: publicKey,
+      createdByWallet: publicKey ?? undefined,
       settled: false,
     };
     setCreating(true);
@@ -162,7 +162,7 @@ export default function TripsPage() {
                       key={trip.id}
                       trip={trip}
                       expenseCount={tripExpenses.length}
-                      totalXLM={totalXLM}
+                      totalXLM={stroopsToXlm(totalStroops)}
                       currentUserPublicKey={publicKey}
                       onDelete={handleDeleteTrip}
                       index={i}
