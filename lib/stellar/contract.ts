@@ -287,6 +287,8 @@ export async function getContractPayments(
       next_offset?: number | bigint | null;
     };
 
+    // This is intentionally simulation-only. get_payments is a pure read;
+    // TTL maintenance must be submitted as an extend_trip transaction.
     const rawPayments: RawPayment[] = [];
     let offset = 0;
 
@@ -389,6 +391,7 @@ export async function checkIsPaid(
       .setTimeout(30)
       .build();
 
+    // This is intentionally simulation-only. is_paid does not mutate TTLs.
     const simResult = await sorobanServer.simulateTransaction(tx);
 
     if (

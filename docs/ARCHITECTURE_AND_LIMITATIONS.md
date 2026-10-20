@@ -111,6 +111,13 @@ SettleX uses:
   it, a bogus or mistaken record permanently blocks the legitimate one for that
   `(expense_id, member)` pair. It clears the flag only; the original entry stays
   in the trip's payment history so the audit trail is not rewritten.
+- `get_payments` and `is_paid` are pure reads. Their Soroban RPC simulations do
+  not commit storage writes, so they do not extend TTLs. A keeper or participant
+  must submit the permissionless `extend_trip(trip_id, payment_offset,
+  expense_offset, limit)` function as a real transaction, repeating with its
+  returned cursors until both are `None`. If data has already archived, the
+  transaction must include the relevant archived footprint so Soroban can
+  restore it before the TTL bump.
 
 ## Operational Constraints
 

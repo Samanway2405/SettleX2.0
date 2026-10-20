@@ -73,6 +73,13 @@ pub struct PaymentPage {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct TtlPage {
+    pub next_payment_offset: Option<u32>,
+    pub next_expense_offset: Option<u32>,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub struct PaymentEventV1 {
     pub version: u32,
     pub expense_id: String,
@@ -609,32 +616,154 @@ impl SettleXContract {
         );
     }
 
-    /// Returns one bounded page of payment index entries and renews only the
-    /// keys that page touched.
+    /// Commits TTL extensions for bounded pages of a trip's history.
     ///
-    /// Only `record_payment` used to bump these keys, so a trip that is read
-    /// often but written rarely could have its entries archived once the bump
-    /// window elapsed -- leaving the history unreadable until someone paid a
-    /// restore fee. Extending on read keeps live data live, the same way
-    /// `pool::balance_of` does.
-    pub fn get_payments(env: Env, trip_id: String, offset: u32, limit: u32) -> PaymentPage {
-        if limit == 0 || limit > MAX_PAGE_SIZE {
+    /// This is permissionless so a keeper or participant can submit it as a
+    /// real transaction. Call again with each returned cursor until both are
+    /// `None`; simulation alone does not persist TTL changes.
+    pub fn extend_trip(
+        env: Env,
+        trip_id: String,
+        payment_offset: u32,
+        expense_offset: u32,
+        limit: u32,
+    ) -> TtlPage {
+        Self::require_current_version(&env);
+        if trip_id.len() == 0 {
+            panic_with_error!(&env, ContractError::EmptyId);
+        }
+        if trip_id.len() > MAX_ID_LEN || limit == 0 || limit > MAX_PAGE_SIZE {
             panic_with_error!(&env, ContractError::InvalidPage);
         }
+
         env.storage()
             .instance()
             .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
+        let next_payment_offset = Self::extend_payment_page(&env, &trip_id, payment_offset, limit);
+        let next_expense_offset = Self::extend_expense_page(&env, &trip_id, expense_offset, limit);
+
+        let legacy_key = DataKey::TripExpenseIds(trip_id);
+        if env.storage().persistent().has(&legacy_key) {
+            env.storage().persistent().extend_ttl(
+                &legacy_key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
+        }
+
+        TtlPage {
+            next_payment_offset,
+            next_expense_offset,
+        }
+    }
+
+    fn extend_payment_page(env: &Env, trip_id: &String, offset: u32, limit: u32) -> Option<u32> {
+        let count_key = DataKey::PaymentCount(trip_id.clone());
+        let Some(count) = env.storage().persistent().get::<_, u32>(&count_key) else {
+            return None;
+        };
+        env.storage().persistent().extend_ttl(
+            &count_key,
+            STORAGE_BUMP_THRESHOLD,
+            STORAGE_BUMP_AMOUNT,
+        );
+
+        let end = offset.saturating_add(limit).min(count);
+        let mut index = offset.min(count);
+        while index < end {
+            let index_key = DataKey::PaymentAt(trip_id.clone(), index);
+            if let Some(payment) = env
+                .storage()
+                .persistent()
+                .get::<_, PaymentRecord>(&index_key)
+            {
+                env.storage().persistent().extend_ttl(
+                    &index_key,
+                    STORAGE_BUMP_THRESHOLD,
+                    STORAGE_BUMP_AMOUNT,
+                );
+                let paid_key =
+                    DataKey::ExpensePaid(payment.expense_id.clone(), payment.member.clone());
+                if env.storage().persistent().has(&paid_key) {
+                    env.storage().persistent().extend_ttl(
+                        &paid_key,
+                        STORAGE_BUMP_THRESHOLD,
+                        STORAGE_BUMP_AMOUNT,
+                    );
+                }
+                let payment_key = DataKey::ExpensePayment(
+                    trip_id.clone(),
+                    payment.expense_id.clone(),
+                    payment.member.clone(),
+                );
+                if env.storage().persistent().has(&payment_key) {
+                    env.storage().persistent().extend_ttl(
+                        &payment_key,
+                        STORAGE_BUMP_THRESHOLD,
+                        STORAGE_BUMP_AMOUNT,
+                    );
+                }
+            }
+            index += 1;
+        }
+        if end < count {
+            Some(end)
+        } else {
+            None
+        }
+    }
+
+    fn extend_expense_page(env: &Env, trip_id: &String, offset: u32, limit: u32) -> Option<u32> {
+        let count_key = DataKey::TripExpenseCount(trip_id.clone());
+        let Some(count) = env.storage().persistent().get::<_, u32>(&count_key) else {
+            return None;
+        };
+        env.storage().persistent().extend_ttl(
+            &count_key,
+            STORAGE_BUMP_THRESHOLD,
+            STORAGE_BUMP_AMOUNT,
+        );
+
+        let end = offset.saturating_add(limit).min(count);
+        let mut index = offset.min(count);
+        while index < end {
+            let entry_key = DataKey::TripExpenseAt(trip_id.clone(), index);
+            if let Some(expense_id) = env.storage().persistent().get::<_, String>(&entry_key) {
+                env.storage().persistent().extend_ttl(
+                    &entry_key,
+                    STORAGE_BUMP_THRESHOLD,
+                    STORAGE_BUMP_AMOUNT,
+                );
+                let marker_key = DataKey::TripExpenseIndex(trip_id.clone(), expense_id);
+                if env.storage().persistent().has(&marker_key) {
+                    env.storage().persistent().extend_ttl(
+                        &marker_key,
+                        STORAGE_BUMP_THRESHOLD,
+                        STORAGE_BUMP_AMOUNT,
+                    );
+                }
+            }
+            index += 1;
+        }
+        if end < count {
+            Some(end)
+        } else {
+            None
+        }
+    }
+
+    /// Returns one bounded page of payment index entries without changing
+    /// contract state. TTL changes require `extend_trip` to be submitted.
+    pub fn get_payments(env: Env, trip_id: String, offset: u32, limit: u32) -> PaymentPage {
+        if limit == 0 || limit > MAX_PAGE_SIZE {
+            panic_with_error!(&env, ContractError::InvalidPage);
+        }
         let mut next_offset = None;
         let mut payments = Vec::new(&env);
         let payment_count_key = DataKey::PaymentCount(trip_id.clone());
 
         if let Some(count) = env.storage().persistent().get::<_, u32>(&payment_count_key) {
-            env.storage().persistent().extend_ttl(
-                &payment_count_key,
-                STORAGE_BUMP_THRESHOLD,
-                STORAGE_BUMP_AMOUNT,
-            );
             let end = offset.saturating_add(limit).min(count);
             let mut index = offset.min(count);
             while index < end {
@@ -648,11 +777,6 @@ impl SettleXContract {
                         DataKey::ClearedPayment(payment.expense_id.clone(), payment.member.clone());
                     let voided = env.storage().persistent().has(&cleared_key);
                     payments.push_back(PaymentRecord { voided, ..payment });
-                    env.storage().persistent().extend_ttl(
-                        &index_key,
-                        STORAGE_BUMP_THRESHOLD,
-                        STORAGE_BUMP_AMOUNT,
-                    );
                 }
                 index += 1;
             }
@@ -687,11 +811,6 @@ impl SettleXContract {
                             }
                         }
                     }
-                    env.storage().persistent().extend_ttl(
-                        &legacy_key,
-                        STORAGE_BUMP_THRESHOLD,
-                        STORAGE_BUMP_AMOUNT,
-                    );
                 }
             }
         } else {
@@ -707,11 +826,6 @@ impl SettleXContract {
                 .persistent()
                 .get::<_, Vec<String>>(&legacy_key)
             {
-                env.storage().persistent().extend_ttl(
-                    &legacy_key,
-                    STORAGE_BUMP_THRESHOLD,
-                    STORAGE_BUMP_AMOUNT,
-                );
                 let count = legacy_expenses.len();
                 let end = offset.saturating_add(limit).min(count);
                 let mut index = offset.min(count);
@@ -732,14 +846,6 @@ impl SettleXContract {
                         .get(&key)
                         .unwrap_or_else(|| Vec::new(&env));
 
-                    if env.storage().persistent().has(&key) {
-                        env.storage().persistent().extend_ttl(
-                            &key,
-                            STORAGE_BUMP_THRESHOLD,
-                            STORAGE_BUMP_AMOUNT,
-                        );
-                    }
-
                     for payment in expense_payments.iter() {
                         let cleared_key =
                             DataKey::ClearedPayment(expense_id.clone(), payment.member.clone());
@@ -757,27 +863,10 @@ impl SettleXContract {
         }
     }
 
-    /// Checking a member's paid status also renews the record.
-    ///
-    /// Without this a settled share that is only ever read -- the common case
-    /// once a trip winds down -- could be archived, and the UI would then show
-    /// an already-settled share as unpaid.
+    /// Checks a member's paid status without changing contract state.
     pub fn is_paid(env: Env, expense_id: String, member: Address) -> bool {
-        env.storage()
-            .instance()
-            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
         let key = DataKey::ExpensePaid(expense_id, member);
-        let paid = env.storage().persistent().has(&key);
-
-        if paid {
-            env.storage().persistent().extend_ttl(
-                &key,
-                STORAGE_BUMP_THRESHOLD,
-                STORAGE_BUMP_AMOUNT,
-            );
-        }
-
-        paid
+        env.storage().persistent().has(&key)
     }
 }
 
@@ -1841,10 +1930,49 @@ mod test {
         setup!(env, client, pool_client);
         let _ = &pool_client;
 
-        // extend_ttl traps on an absent key, so the unpaid path must not bump.
         let expense_id = String::from_str(&env, "exp-never-paid");
         let member = Address::generate(&env);
         assert!(!client.is_paid(&expense_id, &member));
+    }
+
+    #[test]
+    fn test_extend_trip_is_permissionless_and_paginated() {
+        setup!(env, client, pool_client);
+
+        let trip_id = String::from_str(&env, "trip-ttl");
+        let payer = Address::generate(&env);
+        let member_a = Address::generate(&env);
+        let member_b = Address::generate(&env);
+        let expense_a = String::from_str(&env, "expense-ttl-a");
+        let expense_b = String::from_str(&env, "expense-ttl-b");
+
+        client.record_payment(
+            &trip_id,
+            &expense_a,
+            &payer,
+            &member_a,
+            &1_i128,
+            &String::from_str(&env, "ttl-a"),
+        );
+        client.record_payment(
+            &trip_id,
+            &expense_b,
+            &payer,
+            &member_b,
+            &1_i128,
+            &String::from_str(&env, "ttl-b"),
+        );
+
+        // No member or admin authorization is supplied: the keeper operation
+        // is intentionally permissionless.
+        env.set_auths(&[]);
+        let page = client.extend_trip(&trip_id, &0_u32, &0_u32, &1_u32);
+        assert_eq!(page.next_payment_offset, Some(1));
+        assert_eq!(page.next_expense_offset, Some(1));
+
+        let final_page = client.extend_trip(&trip_id, &1_u32, &1_u32, &1_u32);
+        assert_eq!(final_page.next_payment_offset, None);
+        assert_eq!(final_page.next_expense_offset, None);
     }
 
     #[test]

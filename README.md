@@ -268,8 +268,16 @@ This section maps the required submission checklist to concrete proof in this re
 | Function                                                              | Type  | Purpose                                                 |
 | --------------------------------------------------------------------- | ----- | ------------------------------------------------------- |
 | `record_payment(trip_id, expense_id, payer, member, amount, tx_hash)` | Write | Stores payment record on-chain after XLM transfer       |
-| `get_payments(trip_id, offset, limit)`                                | Read  | Returns a bounded page of expense payment shards        |
+| `get_payments(trip_id, offset, limit)`                                | Read  | Returns a bounded page of payment history               |
 | `is_paid(expense_id, member)`                                         | Read  | Checks if a member has already settled a specific share |
+| `extend_trip(trip_id, payment_offset, expense_offset, limit)`         | Write | Permissionlessly renews TTLs for bounded history pages  |
+
+`get_payments` and `is_paid` are pure simulated reads; they do not renew
+storage TTLs. To keep history live, submit `extend_trip` as a real transaction
+(a keeper or any participant may submit it), then repeat with the returned
+payment and expense offsets until both are `None`. If an entry has already
+expired, include the archived footprint in the transaction so Soroban can
+restore it, or restore the trip's data before calling `extend_trip`.
 
 **Error codes handled by the frontend:**
 
