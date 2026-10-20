@@ -51,11 +51,12 @@ Run contract tests:
 
 Recommended flow:
 
-1. Build contract via Stellar CLI tooling.
-2. Deploy settlement and pool contract instances.
-3. Initialize pool and settlement references.
-4. Execute one `record_payment` flow that triggers pool withdraw to prove inter-contract behavior.
-5. Update `NEXT_PUBLIC_CONTRACT_ID` with settlement contract ID.
+1. Run `./scripts/deploy-contract.sh <secret-key-or-alias> [network]`.
+   Constructors atomically initialize both instances, and the script then
+   submits the admin-authenticated cross-reference update.
+2. Record the printed contract IDs and transaction output.
+3. Execute one `record_payment` flow that triggers pool withdraw to prove inter-contract behavior.
+5. Update `NEXT_PUBLIC_CONTRACT_ID` with the printed settlement contract ID.
 6. Save all explorer links in README/docs.
 
 ## 5. CI/CD Verification

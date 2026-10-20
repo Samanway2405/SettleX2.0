@@ -146,6 +146,25 @@ pub struct SettleXContract;
 
 #[contractimpl]
 impl SettleXContract {
+    pub fn __constructor(env: Env, admin: Address) {
+        Self::initialize(&env, admin);
+    }
+
+    fn initialize(env: &Env, admin: Address) {
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(env, ContractError::AlreadyInitialized);
+        }
+
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &CONTRACT_VERSION);
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+    }
+
     pub fn init(env: Env, admin: Address, pool_contract: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
@@ -155,11 +174,7 @@ impl SettleXContract {
             panic_with_error!(&env, ContractError::InvalidActor);
         }
 
-        admin.require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::Version, &CONTRACT_VERSION);
-        env.storage().instance().set(&DataKey::Admin, &admin);
+        Self::initialize(&env, admin);
         env.storage()
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);

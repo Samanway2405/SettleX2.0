@@ -63,13 +63,17 @@ pub struct SettlementPoolContract;
 
 #[contractimpl]
 impl SettlementPoolContract {
-    pub fn init_pool(env: Env, admin: Address, settlement_contract: Address) {
+    pub fn __constructor(env: Env, admin: Address, settlement_contract: Address) {
+        Self::initialize(&env, admin, settlement_contract);
+    }
+
+    fn initialize(env: &Env, admin: Address, settlement_contract: Address) {
         if env.storage().instance().has(&PoolDataKey::Config) {
-            panic_with_error!(&env, PoolError::AlreadyInitialized);
+            panic_with_error!(env, PoolError::AlreadyInitialized);
         }
 
         if admin == settlement_contract {
-            panic_with_error!(&env, PoolError::InvalidActor);
+            panic_with_error!(env, PoolError::InvalidActor);
         }
 
         admin.require_auth();
@@ -86,6 +90,18 @@ impl SettlementPoolContract {
         env.storage()
             .instance()
             .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+    }
+
+    pub fn init_pool(env: Env, admin: Address, settlement_contract: Address) {
+        if env.storage().instance().has(&PoolDataKey::Config) {
+            panic_with_error!(&env, PoolError::AlreadyInitialized);
+        }
+
+        if admin == settlement_contract {
+            panic_with_error!(&env, PoolError::InvalidActor);
+        }
+
+        Self::initialize(&env, admin.clone(), settlement_contract.clone());
 
         env.events().publish(
             (symbol_short!("pool_ini"),),
