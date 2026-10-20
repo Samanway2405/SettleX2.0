@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short,
-    Address, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    BytesN, Env,
 };
 
 #[contracterror]
@@ -79,9 +79,13 @@ impl SettlementPoolContract {
             settlement_contract: settlement_contract.clone(),
         };
 
-        env.storage().instance().set(&PoolDataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .set(&PoolDataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&PoolDataKey::Config, &cfg);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("pool_ini"),),
@@ -113,12 +117,21 @@ impl SettlementPoolContract {
         }
 
         let admin = Self::require_admin_at_supported_version(&env);
-        env.storage().instance().set(&PoolDataKey::Version, &CONTRACT_VERSION);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&PoolDataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("migrate"),),
-            (old_version, CONTRACT_VERSION, admin, env.ledger().timestamp()),
+            (
+                old_version,
+                CONTRACT_VERSION,
+                admin,
+                env.ledger().timestamp(),
+            ),
         );
     }
 
@@ -152,12 +165,15 @@ impl SettlementPoolContract {
     pub fn get_config(env: Env) -> PoolConfig {
         Self::require_current_version(&env);
 
-        let cfg = env.storage()
+        let cfg = env
+            .storage()
             .instance()
             .get(&PoolDataKey::Config)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
 
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
         cfg
     }
 
@@ -171,7 +187,9 @@ impl SettlementPoolContract {
 
         cfg.settlement_contract = new_contract;
         env.storage().instance().set(&PoolDataKey::Config, &cfg);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("pool_cfg"),),
@@ -270,10 +288,7 @@ impl SettlementPoolContract {
         let _cfg = Self::get_config(env.clone());
 
         let key = PoolDataKey::Balance(member);
-        let balance = env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(0_i128);
+        let balance = env.storage().persistent().get(&key).unwrap_or(0_i128);
 
         env.storage()
             .persistent()

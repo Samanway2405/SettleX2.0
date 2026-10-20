@@ -32,6 +32,26 @@ type RowState =
   | { status: "paying" }
   | { status: "done"; txHash: string };
 
+function filterMemberEvents(
+  expenses: Expense[],
+  events: ContractPaymentEvent[],
+): ContractPaymentEvent[] {
+  const membersByExpense = new Map(
+    expenses.map((expense) => [
+      expense.id,
+      new Set(
+        [...expense.members, ...expense.shares]
+          .map((member) => member.walletAddress?.toLowerCase())
+          .filter((address): address is string => Boolean(address)),
+      ),
+    ]),
+  );
+
+  return events.filter((event) =>
+    membersByExpense.get(event.expenseId)?.has(event.member.toLowerCase()) ?? false,
+  );
+}
+
 function deriveRawDebts(expenses: Expense[], onChainEvents: ContractPaymentEvent[] = []): RawDebt[] {
   const attestedOnChainSet = new Set(
     onChainEvents
@@ -243,12 +263,13 @@ function NetPaymentRow({
 }
 
 export function SettlementSummary({ trip, expenses, onChainEvents = [] }: SettlementSummaryProps) {
-  const rawDebts         = useMemo(() => deriveRawDebts(expenses, onChainEvents), [expenses, onChainEvents]);
-  const unverifiedClaims = useMemo(() => deriveUnverifiedClaims(expenses, onChainEvents), [expenses, onChainEvents]);
+  const memberEvents     = useMemo(() => filterMemberEvents(expenses, onChainEvents), [expenses, onChainEvents]);
+  const rawDebts         = useMemo(() => deriveRawDebts(expenses, memberEvents), [expenses, memberEvents]);
+  const unverifiedClaims = useMemo(() => deriveUnverifiedClaims(expenses, memberEvents), [expenses, memberEvents]);
   const eventCounts      = useMemo(() => ({
-    attested: onChainEvents.filter((event) => event.attested === true).length,
-    selfReported: onChainEvents.filter((event) => event.attested !== true).length,
-  }), [onChainEvents]);
+    attested: memberEvents.filter((event) => event.attested === true).length,
+    selfReported: memberEvents.filter((event) => event.attested !== true).length,
+  }), [memberEvents]);
   const netPayments      = useMemo(() => computeNetPayments(rawDebts), [rawDebts]);
 
   if (netPayments.length === 0) {

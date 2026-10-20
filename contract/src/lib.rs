@@ -3,55 +3,55 @@
 pub mod pool;
 
 use soroban_sdk::{
-    contract, contractimpl, contracterror, contracttype, panic_with_error, symbol_short,
-    Address, BytesN, Env, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    BytesN, Env, String, Vec,
 };
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ContractError {
-    InvalidAmount      = 1,
-    AlreadyPaid        = 2,
-    EmptyId            = 3,
+    InvalidAmount = 1,
+    AlreadyPaid = 2,
+    EmptyId = 3,
     AlreadyInitialized = 4,
-    NotInitialized     = 5,
-    InvalidActor       = 6,
-    IdTooLong          = 7,
-    AmountTooLarge     = 8,
-    VersionMismatch    = 9,
-    TxHashTooLong      = 10,
-    NotPaid            = 11,
-    Unauthorized       = 12,
-    InvalidPage        = 13,
-    IndexOverflow      = 14,
+    NotInitialized = 5,
+    InvalidActor = 6,
+    IdTooLong = 7,
+    AmountTooLarge = 8,
+    VersionMismatch = 9,
+    TxHashTooLong = 10,
+    NotPaid = 11,
+    Unauthorized = 12,
+    InvalidPage = 13,
+    IndexOverflow = 14,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentRecordV1 {
     pub expense_id: String,
-    pub payer:      Address,
-    pub member:     Address,
-    pub amount:     i128,
-    pub tx_hash:    String,
-    pub timestamp:  u64,
+    pub payer: Address,
+    pub member: Address,
+    pub amount: i128,
+    pub tx_hash: String,
+    pub timestamp: u64,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentRecord {
     pub expense_id: String,
-    pub payer:      Address,
-    pub member:     Address,
-    pub amount:     i128,
-    pub tx_hash:    String,
-    pub timestamp:  u64,
+    pub payer: Address,
+    pub member: Address,
+    pub amount: i128,
+    pub tx_hash: String,
+    pub timestamp: u64,
     /// `true` only when a configured attestor co-signed this record, meaning
     /// something actually checked the Stellar transaction behind `tx_hash`.
     /// `false` means the record is self-attested by the member: the contract
     /// stores the string but verifies nothing about it.
-    pub attested:   bool,
+    pub attested: bool,
     /// `true` when an admin has repudiated this record via `clear_paid`.
     ///
     /// Never persisted on the record itself: history is written once and left
@@ -59,38 +59,38 @@ pub struct PaymentRecord {
     /// work. `get_payments` sets this at read time from the `ClearedPayment`
     /// marker, so the audit trail stays intact while consumers can still tell
     /// that the admin disowned the entry.
-    pub voided:     bool,
+    pub voided: bool,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentPage {
-    pub payments:    Vec<PaymentRecord>,
-    /// Expense-index offset for the next page, or None when this is the last
-    /// page. The cursor advances by expense shards rather than payment count.
+    pub payments: Vec<PaymentRecord>,
+    /// Payment-index offset for the next page, or None when this is the last
+    /// page.
     pub next_offset: Option<u32>,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct PaymentEventV1 {
-    pub version:     u32,
-    pub expense_id:  String,
-    pub payer:       Address,
-    pub member:      Address,
-    pub amount:      i128,
-    pub tx_hash:     String,
-    pub timestamp:   u64,
-    pub attested:    bool,
+    pub version: u32,
+    pub expense_id: String,
+    pub payer: Address,
+    pub member: Address,
+    pub amount: i128,
+    pub tx_hash: String,
+    pub timestamp: u64,
+    pub attested: bool,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub struct PoolConfigEventV1 {
-    pub version:      u32,
+    pub version: u32,
     pub pool_contract: Address,
-    pub updated_by:   Address,
-    pub timestamp:    u64,
+    pub updated_by: Address,
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -103,9 +103,14 @@ pub enum DataKey {
     TripExpenseAt(String, u32),
     /// O(1) membership marker, storing the expense's index.
     TripExpenseIndex(String, String),
-    /// Payments for a specific trip and expense; prevents one huge ledger vector from
-    /// accumulating across the entire trip.
+    /// Legacy v2 payment vector. New writes never read or rewrite this key.
     ExpensePayments(String, String),
+    /// One payment record per `(trip, expense, member)`.
+    ExpensePayment(String, String, Address),
+    /// Number of bounded payment index entries for a trip.
+    PaymentCount(String),
+    /// Stores one bounded payment history record.
+    PaymentAt(String, u32),
     ExpensePaid(String, Address),
     Admin,
     PoolContract,
@@ -119,22 +124,21 @@ pub enum DataKey {
     ClearedPayment(String, Address),
 }
 
-const LEDGERS_PER_DAY:        u32 = 17_280;
+const LEDGERS_PER_DAY: u32 = 17_280;
 const STORAGE_BUMP_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
-const STORAGE_BUMP_AMOUNT:    u32 = LEDGERS_PER_DAY * 365;
-const CONTRACT_VERSION:       u32 = 2;
-const MIN_MIGRATABLE_VERSION:  u32 = 1;
-const MAX_ID_LEN:             u32 = 64;
-const MAX_TX_HASH_LEN:        u32 = 128;
-const MAX_AMOUNT_STROOPS:     i128 = 10_000_000_000_000_000;
-const MAX_PAGE_SIZE:          u32 = 50;
+const STORAGE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 365;
+const CONTRACT_VERSION: u32 = 2;
+const MIN_MIGRATABLE_VERSION: u32 = 1;
+const MAX_ID_LEN: u32 = 64;
+const MAX_TX_HASH_LEN: u32 = 128;
+const MAX_AMOUNT_STROOPS: i128 = 10_000_000_000_000_000;
+const MAX_PAGE_SIZE: u32 = 50;
 
 #[contract]
 pub struct SettleXContract;
 
 #[contractimpl]
 impl SettleXContract {
-
     pub fn init(env: Env, admin: Address, pool_contract: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
@@ -145,12 +149,19 @@ impl SettleXContract {
         }
 
         admin.require_auth();
-        env.storage().instance().set(&DataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::PoolContract, &pool_contract);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&DataKey::PoolContract, &pool_contract);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
-        env.events().publish((symbol_short!("stx_ini"),), CONTRACT_VERSION);
+        env.events()
+            .publish((symbol_short!("stx_ini"),), CONTRACT_VERSION);
     }
 
     /// Installs new WASM for this contract. If the replacement changes storage
@@ -179,12 +190,21 @@ impl SettleXContract {
         }
 
         let admin = Self::require_admin_at_supported_version(&env);
-        env.storage().instance().set(&DataKey::Version, &CONTRACT_VERSION);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("migrate"),),
-            (old_version, CONTRACT_VERSION, admin, env.ledger().timestamp()),
+            (
+                old_version,
+                CONTRACT_VERSION,
+                admin,
+                env.ledger().timestamp(),
+            ),
         );
     }
 
@@ -202,8 +222,12 @@ impl SettleXContract {
         }
 
         admin.require_auth();
-        env.storage().instance().set(&DataKey::PoolContract, &pool_contract);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&DataKey::PoolContract, &pool_contract);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("pool_cfg"),),
@@ -219,12 +243,15 @@ impl SettleXContract {
     pub fn get_pool_contract(env: Env) -> Address {
         Self::require_current_version(&env);
 
-        let pool = env.storage()
+        let pool = env
+            .storage()
             .instance()
             .get(&DataKey::PoolContract)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
         pool
     }
 
@@ -280,8 +307,7 @@ impl SettleXContract {
         let mut count = 0_u32;
 
         for expense_id in legacy_expenses.iter() {
-            let marker_key =
-                DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
+            let marker_key = DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
             if env.storage().persistent().has(&marker_key) {
                 continue;
             }
@@ -310,9 +336,9 @@ impl SettleXContract {
             STORAGE_BUMP_THRESHOLD,
             STORAGE_BUMP_AMOUNT,
         );
-        if env.storage().persistent().has(&legacy_key) {
-            env.storage().persistent().remove(&legacy_key);
-        }
+        // Keep the legacy list until its payment vectors have been read. A
+        // trip can receive a new bounded payment after an upgrade while still
+        // containing v2 history.
     }
 
     /// Configures the off-chain verifier that must co-sign `record_payment`.
@@ -329,7 +355,9 @@ impl SettleXContract {
         }
 
         env.storage().instance().set(&DataKey::Attestor, &attestor);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("attestor"),),
@@ -347,7 +375,9 @@ impl SettleXContract {
     pub fn clear_attestor(env: Env) {
         let admin = Self::require_admin(&env);
         env.storage().instance().remove(&DataKey::Attestor);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("attest_c"),),
@@ -393,11 +423,15 @@ impl SettleXContract {
         // event -- which no consumer reads -- says otherwise.
         let cleared_key = DataKey::ClearedPayment(expense_id.clone(), member.clone());
         env.storage().persistent().set(&cleared_key, &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&cleared_key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage().persistent().extend_ttl(
+            &cleared_key,
+            STORAGE_BUMP_THRESHOLD,
+            STORAGE_BUMP_AMOUNT,
+        );
 
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("pmt_clr"), expense_id),
@@ -406,13 +440,13 @@ impl SettleXContract {
     }
 
     pub fn record_payment(
-        env:        Env,
-        trip_id:    String,
+        env: Env,
+        trip_id: String,
         expense_id: String,
-        payer:      Address,
-        member:     Address,
-        amount:     i128,
-        tx_hash:    String,
+        payer: Address,
+        member: Address,
+        amount: i128,
+        tx_hash: String,
     ) {
         member.require_auth();
 
@@ -474,7 +508,7 @@ impl SettleXContract {
         let record = PaymentRecord {
             expense_id: expense_id.clone(),
             payer: payer.clone(),
-            member:    member.clone(),
+            member: member.clone(),
             amount,
             tx_hash: tx_hash.clone(),
             timestamp: env.ledger().timestamp(),
@@ -482,52 +516,83 @@ impl SettleXContract {
             voided: false,
         };
 
-        let expense_key = DataKey::ExpensePayments(trip_id.clone(), expense_id.clone());
-        let mut payments: Vec<PaymentRecord> = env
-            .storage()
-            .persistent()
-            .get(&expense_key)
-            .unwrap_or_else(|| Vec::new(&env));
-        payments.push_back(record);
-        env.storage().persistent().set(&expense_key, &payments);
-        env.storage()
-            .persistent()
-            .extend_ttl(&expense_key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        // Keep each record in its own bounded storage entry. In particular, do
+        // not append to a vector: one hostile member must not make later
+        // members pay the cost of reading and rewriting that vector.
+        let payment_key =
+            DataKey::ExpensePayment(trip_id.clone(), expense_id.clone(), member.clone());
+        env.storage().persistent().set(&payment_key, &record);
+        env.storage().persistent().extend_ttl(
+            &payment_key,
+            STORAGE_BUMP_THRESHOLD,
+            STORAGE_BUMP_AMOUNT,
+        );
 
-        Self::ensure_trip_expense_index(&env, &trip_id);
-        let count_key = DataKey::TripExpenseCount(trip_id.clone());
-        let marker_key =
-            DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
-        let expense_index: u32;
-
-        if let Some(existing_index) = env.storage().persistent().get(&marker_key) {
-            expense_index = existing_index;
-        } else {
-            let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-            expense_index = count;
-            let next_count = count
-                .checked_add(1)
-                .unwrap_or_else(|| panic_with_error!(&env, ContractError::IndexOverflow));
-            env.storage().persistent().set(&marker_key, &expense_index);
-            env.storage().persistent().set(&count_key, &next_count);
+        let count_key = DataKey::PaymentCount(trip_id.clone());
+        let payment_index: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let next_count = payment_index
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::IndexOverflow));
+        let index_key = DataKey::PaymentAt(trip_id.clone(), payment_index);
+        env.storage().persistent().set(&index_key, &record);
+        env.storage().persistent().set(&count_key, &next_count);
+        for key in [&index_key, &count_key] {
+            env.storage()
+                .persistent()
+                .extend_ttl(key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
         }
 
-        let entry_key = DataKey::TripExpenseAt(trip_id.clone(), expense_index);
-        env.storage().persistent().set(&entry_key, &expense_id);
-        for index_key in [&count_key, &marker_key, &entry_key] {
+        // Keep the bounded expense index in sync for callers that use the
+        // trip's expense list, but do not use it as payment history storage.
+        Self::ensure_trip_expense_index(&env, &trip_id);
+        let expense_count_key = DataKey::TripExpenseCount(trip_id.clone());
+        let marker_key = DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
+        if let Some(existing_index) = env.storage().persistent().get::<_, u32>(&marker_key) {
+            let entry_key = DataKey::TripExpenseAt(trip_id.clone(), existing_index);
             env.storage().persistent().extend_ttl(
-                index_key,
+                &entry_key,
                 STORAGE_BUMP_THRESHOLD,
                 STORAGE_BUMP_AMOUNT,
             );
+            env.storage().persistent().extend_ttl(
+                &marker_key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
+        } else {
+            let expense_index: u32 = env
+                .storage()
+                .persistent()
+                .get(&expense_count_key)
+                .unwrap_or(0);
+            let next_expense_count = expense_index
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, ContractError::IndexOverflow));
+            let entry_key = DataKey::TripExpenseAt(trip_id.clone(), expense_index);
+            env.storage().persistent().set(&entry_key, &expense_id);
+            env.storage().persistent().set(&marker_key, &expense_index);
+            env.storage()
+                .persistent()
+                .set(&expense_count_key, &next_expense_count);
+            for key in [&expense_count_key, &marker_key, &entry_key] {
+                env.storage().persistent().extend_ttl(
+                    key,
+                    STORAGE_BUMP_THRESHOLD,
+                    STORAGE_BUMP_AMOUNT,
+                );
+            }
         }
 
         env.storage().persistent().set(&paid_key, &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&paid_key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage().persistent().extend_ttl(
+            &paid_key,
+            STORAGE_BUMP_THRESHOLD,
+            STORAGE_BUMP_AMOUNT,
+        );
 
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("pmt_rec"), trip_id),
@@ -544,21 +609,15 @@ impl SettleXContract {
         );
     }
 
-    /// Returns one bounded page of expense shards and renews only the keys that
-    /// page touched. offset and limit are expense-index positions, not payment
-    /// counts; next_offset is therefore the only cursor callers should follow.
+    /// Returns one bounded page of payment index entries and renews only the
+    /// keys that page touched.
     ///
     /// Only `record_payment` used to bump these keys, so a trip that is read
     /// often but written rarely could have its entries archived once the bump
     /// window elapsed -- leaving the history unreadable until someone paid a
     /// restore fee. Extending on read keeps live data live, the same way
     /// `pool::balance_of` does.
-    pub fn get_payments(
-        env: Env,
-        trip_id: String,
-        offset: u32,
-        limit: u32,
-    ) -> PaymentPage {
+    pub fn get_payments(env: Env, trip_id: String, offset: u32, limit: u32) -> PaymentPage {
         if limit == 0 || limit > MAX_PAGE_SIZE {
             panic_with_error!(&env, ContractError::InvalidPage);
         }
@@ -566,50 +625,87 @@ impl SettleXContract {
             .instance()
             .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
-        let mut expense_ids = Vec::new(&env);
         let mut next_offset = None;
-        let count_key = DataKey::TripExpenseCount(trip_id.clone());
+        let mut payments = Vec::new(&env);
+        let payment_count_key = DataKey::PaymentCount(trip_id.clone());
 
-        if let Some(count) = env.storage().persistent().get::<_, u32>(&count_key) {
+        if let Some(count) = env.storage().persistent().get::<_, u32>(&payment_count_key) {
             env.storage().persistent().extend_ttl(
-                &count_key,
+                &payment_count_key,
                 STORAGE_BUMP_THRESHOLD,
                 STORAGE_BUMP_AMOUNT,
             );
             let end = offset.saturating_add(limit).min(count);
             let mut index = offset.min(count);
             while index < end {
-                let entry_key = DataKey::TripExpenseAt(trip_id.clone(), index);
-                if let Some(expense_id) =
-                    env.storage().persistent().get::<_, String>(&entry_key)
+                let index_key = DataKey::PaymentAt(trip_id.clone(), index);
+                if let Some(payment) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, PaymentRecord>(&index_key)
                 {
+                    let cleared_key =
+                        DataKey::ClearedPayment(payment.expense_id.clone(), payment.member.clone());
+                    let voided = env.storage().persistent().has(&cleared_key);
+                    payments.push_back(PaymentRecord { voided, ..payment });
                     env.storage().persistent().extend_ttl(
-                        &entry_key,
+                        &index_key,
                         STORAGE_BUMP_THRESHOLD,
                         STORAGE_BUMP_AMOUNT,
                     );
-                    let marker_key =
-                        DataKey::TripExpenseIndex(trip_id.clone(), expense_id.clone());
-                    if env.storage().persistent().has(&marker_key) {
-                        env.storage().persistent().extend_ttl(
-                            &marker_key,
-                            STORAGE_BUMP_THRESHOLD,
-                            STORAGE_BUMP_AMOUNT,
-                        );
-                    }
-                    expense_ids.push_back(expense_id);
                 }
                 index += 1;
             }
             if end < count {
                 next_offset = Some(end);
             }
+
+            // A v2 trip may contain legacy vectors alongside the new index.
+            // They are read only for the first page and are never rewritten by
+            // the bounded write path.
+            if offset == 0 {
+                let legacy_key = DataKey::TripExpenseIds(trip_id.clone());
+                if let Some(legacy_expenses) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, Vec<String>>(&legacy_key)
+                {
+                    for expense_id in legacy_expenses.iter() {
+                        let key = DataKey::ExpensePayments(trip_id.clone(), expense_id.clone());
+                        if let Some(expense_payments) = env
+                            .storage()
+                            .persistent()
+                            .get::<_, Vec<PaymentRecord>>(&key)
+                        {
+                            for payment in expense_payments.iter() {
+                                let cleared_key = DataKey::ClearedPayment(
+                                    expense_id.clone(),
+                                    payment.member.clone(),
+                                );
+                                let voided = env.storage().persistent().has(&cleared_key);
+                                payments.push_back(PaymentRecord { voided, ..payment });
+                            }
+                        }
+                    }
+                    env.storage().persistent().extend_ttl(
+                        &legacy_key,
+                        STORAGE_BUMP_THRESHOLD,
+                        STORAGE_BUMP_AMOUNT,
+                    );
+                }
+            }
         } else {
+            // Read-only compatibility for v2 trips. New writes never touch
+            // these vectors; this branch is only for data created before the
+            // bounded payment index existed.
+            let mut expense_ids = Vec::new(&env);
             // Read-only compatibility for v2 trips. The next payment write
             // converts this vector once and removes it.
             let legacy_key = DataKey::TripExpenseIds(trip_id.clone());
-            if let Some(legacy_expenses) =
-                env.storage().persistent().get::<_, Vec<String>>(&legacy_key)
+            if let Some(legacy_expenses) = env
+                .storage()
+                .persistent()
+                .get::<_, Vec<String>>(&legacy_key)
             {
                 env.storage().persistent().extend_ttl(
                     &legacy_key,
@@ -628,35 +724,30 @@ impl SettleXContract {
                 if end < count {
                     next_offset = Some(end);
                 }
-            }
-        }
+                for expense_id in expense_ids.iter() {
+                    let key = DataKey::ExpensePayments(trip_id.clone(), expense_id.clone());
+                    let expense_payments: Vec<PaymentRecord> = env
+                        .storage()
+                        .persistent()
+                        .get(&key)
+                        .unwrap_or_else(|| Vec::new(&env));
 
-        let mut payments = Vec::new(&env);
-        for expense_id in expense_ids.iter() {
-            let key = DataKey::ExpensePayments(trip_id.clone(), expense_id.clone());
-            let expense_payments: Vec<PaymentRecord> = env
-                .storage()
-                .persistent()
-                .get(&key)
-                .unwrap_or_else(|| Vec::new(&env));
+                    if env.storage().persistent().has(&key) {
+                        env.storage().persistent().extend_ttl(
+                            &key,
+                            STORAGE_BUMP_THRESHOLD,
+                            STORAGE_BUMP_AMOUNT,
+                        );
+                    }
 
-            // The index and the per-expense entries expire independently, so
-            // renew each one we actually touched rather than assuming the index
-            // outliving them means they survived too.
-            if env.storage().persistent().has(&key) {
-                env.storage().persistent().extend_ttl(
-                    &key,
-                    STORAGE_BUMP_THRESHOLD,
-                    STORAGE_BUMP_AMOUNT,
-                );
-            }
+                    for payment in expense_payments.iter() {
+                        let cleared_key =
+                            DataKey::ClearedPayment(expense_id.clone(), payment.member.clone());
+                        let voided = env.storage().persistent().has(&cleared_key);
 
-            for payment in expense_payments.iter() {
-                let cleared_key =
-                    DataKey::ClearedPayment(expense_id.clone(), payment.member.clone());
-                let voided = env.storage().persistent().has(&cleared_key);
-
-                payments.push_back(PaymentRecord { voided, ..payment });
+                        payments.push_back(PaymentRecord { voided, ..payment });
+                    }
+                }
             }
         }
 
@@ -679,9 +770,11 @@ impl SettleXContract {
         let paid = env.storage().persistent().has(&key);
 
         if paid {
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+            env.storage().persistent().extend_ttl(
+                &key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
         }
 
         paid
@@ -751,13 +844,20 @@ mod test {
 
         // The real payment can now be recorded.
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member, &4_000_000_i128, &real_hash,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
+            &4_000_000_i128,
+            &real_hash,
         );
         assert!(client.is_paid(&expense_id, &member));
 
         // History is preserved rather than rewritten — both attempts remain
         // visible for audit.
-        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
+        let payments = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments;
         assert_eq!(payments.len(), 2);
         assert_eq!(payments.get(1).unwrap().tx_hash, real_hash);
     }
@@ -793,7 +893,10 @@ mod test {
         let trip_id = String::from_str(&env, "trip-auth");
         let expense_id = String::from_str(&env, "exp-auth");
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &1_000_000_i128,
             &String::from_str(&env, "hash1234567"),
         );
@@ -828,18 +931,25 @@ mod test {
 
         pool_client.deposit(&member, &10_000_000_i128);
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &1_000_000_i128,
             &String::from_str(&env, "bogus-hash"),
         );
 
-        let before = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
+        let before = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments;
         assert_eq!(before.len(), 1);
         assert!(!before.get(0).unwrap().voided);
 
         client.clear_paid(&expense_id, &member);
 
-        let after = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
+        let after = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments;
         // The audit trail is preserved ...
         assert_eq!(after.len(), 1, "cleared records stay in history");
         // ... but no longer reads as a legitimate payment.
@@ -863,19 +973,27 @@ mod test {
         pool_client.deposit(&member_a, &10_000_000_i128);
         pool_client.deposit(&member_b, &10_000_000_i128);
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member_a,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member_a,
             &1_000_000_i128,
             &String::from_str(&env, "hash-a"),
         );
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member_b,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member_b,
             &1_000_000_i128,
             &String::from_str(&env, "hash-b"),
         );
 
         client.clear_paid(&expense_id, &member_a);
 
-        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
+        let payments = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments;
         assert_eq!(payments.len(), 2);
         for p in payments.iter() {
             if p.member == member_a {
@@ -899,7 +1017,10 @@ mod test {
 
         pool_client.deposit(&member, &10_000_000_i128);
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &1_000_000_i128,
             &String::from_str(&env, "bogus-hash"),
         );
@@ -907,12 +1028,17 @@ mod test {
 
         // The real payment is now recorded.
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &1_000_000_i128,
             &String::from_str(&env, "real-hash"),
         );
 
-        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
+        let payments = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments;
         assert_eq!(payments.len(), 2, "both attempts stay in the audit trail");
         // Neither reads as voided: the marker was consumed by the re-record, so
         // the legitimate replacement stands on its own.
@@ -941,12 +1067,19 @@ mod test {
         assert!(client.get_attestor().is_none());
 
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &1_000_000_i128,
             &String::from_str(&env, "unverified1"),
         );
 
-        let rec = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.get(0).unwrap();
+        let rec = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments
+            .get(0)
+            .unwrap();
         assert!(
             !rec.attested,
             "a record nothing verified must not claim to be attested",
@@ -980,9 +1113,14 @@ mod test {
         let tx_hash = String::from_str(&env, "verified123");
         let amount = 4_000_000_i128;
         let args: soroban_sdk::Vec<soroban_sdk::Val> = (
-            trip_id.clone(), expense_id.clone(), payer.clone(),
-            member.clone(), amount, tx_hash.clone(),
-        ).into_val(&env);
+            trip_id.clone(),
+            expense_id.clone(),
+            payer.clone(),
+            member.clone(),
+            amount,
+            tx_hash.clone(),
+        )
+            .into_val(&env);
 
         env.set_auths(&[]);
         env.mock_auths(&[
@@ -1008,8 +1146,15 @@ mod test {
 
         client.record_payment(&trip_id, &expense_id, &payer, &member, &amount, &tx_hash);
 
-        let rec = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.get(0).unwrap();
-        assert!(rec.attested, "an attestor-cosigned record must be marked attested");
+        let rec = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments
+            .get(0)
+            .unwrap();
+        assert!(
+            rec.attested,
+            "an attestor-cosigned record must be marked attested"
+        );
     }
 
     /// The member alone cannot write a record once an attestor is required.
@@ -1045,9 +1190,14 @@ mod test {
                 contract: &settlement_contract_id,
                 fn_name: "record_payment",
                 args: (
-                    trip_id.clone(), expense_id.clone(), payer.clone(),
-                    member.clone(), amount, tx_hash.clone(),
-                ).into_val(&env),
+                    trip_id.clone(),
+                    expense_id.clone(),
+                    payer.clone(),
+                    member.clone(),
+                    amount,
+                    tx_hash.clone(),
+                )
+                    .into_val(&env),
                 sub_invokes: &[],
             },
         }]);
@@ -1073,8 +1223,9 @@ mod test {
         });
 
         client.migrate();
-        let stored_version: u32 = env
-            .as_contract(&settlement_contract_id, || env.storage().instance().get(&DataKey::Version).unwrap());
+        let stored_version: u32 = env.as_contract(&settlement_contract_id, || {
+            env.storage().instance().get(&DataKey::Version).unwrap()
+        });
         assert_eq!(stored_version, 2_u32);
     }
 
@@ -1126,11 +1277,21 @@ mod test {
         let member = Address::generate(&env);
         pool_client.deposit(&member, &10_000_000_i128);
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &1_000_000_i128,
             &String::from_str(&env, "afterclear1"),
         );
-        assert!(!client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.get(0).unwrap().attested);
+        assert!(
+            !client
+                .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+                .payments
+                .get(0)
+                .unwrap()
+                .attested
+        );
     }
 
     #[test]
@@ -1185,29 +1346,40 @@ mod test {
     fn test_record_and_query() {
         setup!(env, client, pool_client);
 
-        let trip_id    = String::from_str(&env, "trip-123");
+        let trip_id = String::from_str(&env, "trip-123");
         let expense_id = String::from_str(&env, "exp-456");
-        let payer      = Address::generate(&env);
-        let member     = Address::generate(&env);
-        let tx_hash    = String::from_str(&env, "abc123def456");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        let tx_hash = String::from_str(&env, "abc123def456");
 
         pool_client.deposit(&member, &10_000_000_i128);
 
         assert!(!client.is_paid(&expense_id, &member));
-        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 0);
+        assert_eq!(
+            client
+                .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+                .payments
+                .len(),
+            0
+        );
 
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &10_000_000_i128,
             &tx_hash,
         );
 
         assert!(client.is_paid(&expense_id, &member));
 
-        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
+        let payments = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments;
         assert_eq!(payments.len(), 1);
         let rec = payments.get(0).unwrap();
-        assert_eq!(rec.amount,     10_000_000_i128);
+        assert_eq!(rec.amount, 10_000_000_i128);
         assert_eq!(rec.expense_id, expense_id);
     }
 
@@ -1215,36 +1387,83 @@ mod test {
     fn test_multiple_members() {
         setup!(env, client, pool_client);
 
-        let trip_id    = String::from_str(&env, "trip-multi");
+        let trip_id = String::from_str(&env, "trip-multi");
         let expense_id = String::from_str(&env, "exp-multi");
-        let payer      = Address::generate(&env);
-        let member_a   = Address::generate(&env);
-        let member_b   = Address::generate(&env);
-        let tx_a       = String::from_str(&env, "hash_a");
-        let tx_b       = String::from_str(&env, "hash_b");
+        let payer = Address::generate(&env);
+        let member_a = Address::generate(&env);
+        let member_b = Address::generate(&env);
+        let tx_a = String::from_str(&env, "hash_a");
+        let tx_b = String::from_str(&env, "hash_b");
 
         pool_client.deposit(&member_a, &5_000_000_i128);
         pool_client.deposit(&member_b, &7_500_000_i128);
 
-        client.record_payment(&trip_id, &expense_id, &payer, &member_a, &5_000_000_i128, &tx_a);
-        client.record_payment(&trip_id, &expense_id, &payer, &member_b, &7_500_000_i128, &tx_b);
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member_a,
+            &5_000_000_i128,
+            &tx_a,
+        );
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member_b,
+            &7_500_000_i128,
+            &tx_b,
+        );
 
         assert!(client.is_paid(&expense_id, &member_a));
         assert!(client.is_paid(&expense_id, &member_b));
-        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 2);
+        assert_eq!(
+            client
+                .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+                .payments
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_many_members_do_not_block_a_later_payment() {
+        setup!(env, client, _pool_client);
+
+        let trip_id = String::from_str(&env, "trip-many-members");
+        let expense_id = String::from_str(&env, "exp-many-members");
+        let payer = Address::generate(&env);
+        let tx_hash = String::from_str(&env, "spam-record");
+
+        for _ in 0..500 {
+            let member = Address::generate(&env);
+            client.record_payment(&trip_id, &expense_id, &payer, &member, &1_i128, &tx_hash);
+        }
+
+        let real_member = Address::generate(&env);
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &real_member,
+            &1_i128,
+            &String::from_str(&env, "real-payment"),
+        );
+
+        assert!(client.is_paid(&expense_id, &real_member));
     }
 
     #[test]
     fn test_multiple_expenses_same_trip() {
         setup!(env, client, pool_client);
 
-        let trip_id  = String::from_str(&env, "trip-abc");
-        let exp_1    = String::from_str(&env, "exp-001");
-        let exp_2    = String::from_str(&env, "exp-002");
-        let payer    = Address::generate(&env);
-        let member   = Address::generate(&env);
-        let tx_1     = String::from_str(&env, "tx_001");
-        let tx_2     = String::from_str(&env, "tx_002");
+        let trip_id = String::from_str(&env, "trip-abc");
+        let exp_1 = String::from_str(&env, "exp-001");
+        let exp_2 = String::from_str(&env, "exp-002");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        let tx_1 = String::from_str(&env, "tx_001");
+        let tx_2 = String::from_str(&env, "tx_002");
 
         pool_client.deposit(&member, &7_500_000_i128);
 
@@ -1253,27 +1472,35 @@ mod test {
 
         assert!(client.is_paid(&exp_1, &member));
         assert!(client.is_paid(&exp_2, &member));
-        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 2);
+        assert_eq!(
+            client
+                .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+                .payments
+                .len(),
+            2
+        );
     }
 
     #[test]
     fn test_trip_payment_history_is_partitioned_by_expense() {
         setup!(env, client, pool_client);
 
-        let trip_id  = String::from_str(&env, "trip-partition");
-        let exp_1    = String::from_str(&env, "exp-001");
-        let exp_2    = String::from_str(&env, "exp-002");
-        let payer    = Address::generate(&env);
-        let member   = Address::generate(&env);
-        let tx_1     = String::from_str(&env, "tx_001");
-        let tx_2     = String::from_str(&env, "tx_002");
+        let trip_id = String::from_str(&env, "trip-partition");
+        let exp_1 = String::from_str(&env, "exp-001");
+        let exp_2 = String::from_str(&env, "exp-002");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        let tx_1 = String::from_str(&env, "tx_001");
+        let tx_2 = String::from_str(&env, "tx_002");
 
         pool_client.deposit(&member, &7_500_000_i128);
 
         client.record_payment(&trip_id, &exp_1, &payer, &member, &3_000_000_i128, &tx_1);
         client.record_payment(&trip_id, &exp_2, &payer, &member, &4_500_000_i128, &tx_2);
 
-        let payments = client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments;
+        let payments = client
+            .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+            .payments;
         assert_eq!(payments.len(), 2);
 
         let mut seen_expenses = soroban_sdk::Vec::new(&env);
@@ -1283,8 +1510,11 @@ mod test {
         }
 
         assert_eq!(seen_expenses.len(), 2);
-        assert!((seen_expenses.get(0).unwrap() == exp_1 && seen_expenses.get(1).unwrap() == exp_2)
-            || (seen_expenses.get(0).unwrap() == exp_2 && seen_expenses.get(1).unwrap() == exp_1));
+        assert!(
+            (seen_expenses.get(0).unwrap() == exp_1 && seen_expenses.get(1).unwrap() == exp_2)
+                || (seen_expenses.get(0).unwrap() == exp_2
+                    && seen_expenses.get(1).unwrap() == exp_1)
+        );
     }
 
     #[test]
@@ -1453,16 +1683,30 @@ mod test {
     fn test_duplicate_payment_rejected() {
         setup!(env, client, pool_client);
 
-        let trip_id    = String::from_str(&env, "trip-dup");
+        let trip_id = String::from_str(&env, "trip-dup");
         let expense_id = String::from_str(&env, "exp-dup");
-        let payer      = Address::generate(&env);
-        let member     = Address::generate(&env);
-        let tx_hash    = String::from_str(&env, "hash_dup");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        let tx_hash = String::from_str(&env, "hash_dup");
 
         pool_client.deposit(&member, &1_000_000_i128);
 
-        client.record_payment(&trip_id, &expense_id, &payer, &member, &1_000_000_i128, &tx_hash);
-        client.record_payment(&trip_id, &expense_id, &payer, &member, &1_000_000_i128, &tx_hash);
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
+            &1_000_000_i128,
+            &tx_hash,
+        );
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
+            &1_000_000_i128,
+            &tx_hash,
+        );
     }
 
     #[test]
@@ -1470,11 +1714,11 @@ mod test {
     fn test_zero_amount_rejected() {
         setup!(env, client, _pool_client);
 
-        let trip_id    = String::from_str(&env, "trip-zero");
+        let trip_id = String::from_str(&env, "trip-zero");
         let expense_id = String::from_str(&env, "exp-zero");
-        let payer      = Address::generate(&env);
-        let member     = Address::generate(&env);
-        let tx_hash    = String::from_str(&env, "hash_zero");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        let tx_hash = String::from_str(&env, "hash_zero");
 
         client.record_payment(&trip_id, &expense_id, &payer, &member, &0_i128, &tx_hash);
     }
@@ -1484,11 +1728,11 @@ mod test {
     fn test_negative_amount_rejected() {
         setup!(env, client, _pool_client);
 
-        let trip_id    = String::from_str(&env, "trip-neg");
+        let trip_id = String::from_str(&env, "trip-neg");
         let expense_id = String::from_str(&env, "exp-neg");
-        let payer      = Address::generate(&env);
-        let member     = Address::generate(&env);
-        let tx_hash    = String::from_str(&env, "hash_neg");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        let tx_hash = String::from_str(&env, "hash_neg");
 
         client.record_payment(&trip_id, &expense_id, &payer, &member, &-1_i128, &tx_hash);
     }
@@ -1498,11 +1742,11 @@ mod test {
     fn test_empty_tx_hash_rejected() {
         setup!(env, client, _pool_client);
 
-        let trip_id    = String::from_str(&env, "trip-empty-tx");
+        let trip_id = String::from_str(&env, "trip-empty-tx");
         let expense_id = String::from_str(&env, "exp-empty-tx");
-        let payer      = Address::generate(&env);
-        let member     = Address::generate(&env);
-        let tx_hash    = String::from_str(&env, "");
+        let payer = Address::generate(&env);
+        let member = Address::generate(&env);
+        let tx_hash = String::from_str(&env, "");
 
         client.record_payment(&trip_id, &expense_id, &payer, &member, &1_i128, &tx_hash);
     }
@@ -1533,7 +1777,10 @@ mod test {
 
         pool_client.deposit(&member, &10_000_000_i128);
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &10_000_000_i128,
             &tx_hash,
         );
@@ -1543,7 +1790,10 @@ mod test {
         for _ in 0..3 {
             advance_ledgers(&env, STORAGE_BUMP_AMOUNT - 1);
             assert_eq!(
-                client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(),
+                client
+                    .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+                    .payments
+                    .len(),
                 1,
                 "history should survive as long as it keeps being read",
             );
@@ -1567,7 +1817,10 @@ mod test {
 
         pool_client.deposit(&member, &10_000_000_i128);
         client.record_payment(
-            &trip_id, &expense_id, &payer, &member,
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
             &10_000_000_i128,
             &tx_hash,
         );
@@ -1600,7 +1853,13 @@ mod test {
         let _ = &pool_client;
 
         let trip_id = String::from_str(&env, "trip-that-never-existed");
-        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 0);
+        assert_eq!(
+            client
+                .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+                .payments
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -1608,7 +1867,7 @@ mod test {
         setup!(env, client, _pool_client);
 
         let expense_id = String::from_str(&env, "exp-never");
-        let member     = Address::generate(&env);
+        let member = Address::generate(&env);
 
         assert!(!client.is_paid(&expense_id, &member));
     }
@@ -1618,9 +1877,14 @@ mod test {
         setup!(env, client, _pool_client);
 
         let trip_id = String::from_str(&env, "trip-ghost");
-        assert_eq!(client.get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE).payments.len(), 0);
+        assert_eq!(
+            client
+                .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
+                .payments
+                .len(),
+            0
+        );
     }
-
 
     #[test]
     #[should_panic]
@@ -1633,7 +1897,14 @@ mod test {
         let tx_hash = String::from_str(&env, "hash-role");
 
         pool_client.deposit(&actor, &1_000_000_i128);
-        client.record_payment(&trip_id, &expense_id, &actor, &actor, &1_000_000_i128, &tx_hash);
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &actor,
+            &actor,
+            &1_000_000_i128,
+            &tx_hash,
+        );
     }
 
     #[test]
@@ -1648,6 +1919,13 @@ mod test {
         let tx_hash = String::from_str(&env, "hash-big");
 
         pool_client.deposit(&member, &(MAX_AMOUNT_STROOPS + 1));
-        client.record_payment(&trip_id, &expense_id, &payer, &member, &(MAX_AMOUNT_STROOPS + 1), &tx_hash);
+        client.record_payment(
+            &trip_id,
+            &expense_id,
+            &payer,
+            &member,
+            &(MAX_AMOUNT_STROOPS + 1),
+            &tx_hash,
+        );
     }
 }
