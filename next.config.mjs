@@ -21,7 +21,8 @@ const STATIC_ASSET_CSP = [
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   eslint: {
-    dirs: ["app", "components", "context", "hooks", "lib", "types", "scripts"],
+    // Lint the full repository so root files such as middleware.ts are included.
+    dirs: ["."],
   },
 
   // ── Images ────────────────────────────────────────────────────────────────
