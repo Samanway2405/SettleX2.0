@@ -306,9 +306,13 @@ impl SettlementPoolContract {
         let key = PoolDataKey::Balance(member);
         let balance = env.storage().persistent().get(&key).unwrap_or(0_i128);
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
+        }
 
         balance
     }
@@ -331,6 +335,15 @@ mod test {
             let $admin = Address::generate(&$env);
             let $settlement = Address::generate(&$env);
         };
+    }
+
+    #[test]
+    fn test_balance_of_missing_member_is_zero() {
+        setup_pool!(env, client, admin, settlement_contract);
+        client.init_pool(&admin, &settlement_contract);
+
+        let member = Address::generate(&env);
+        assert_eq!(client.balance_of(&member), 0_i128);
     }
 
     // ── Withdraw authorization ────────────────────────────────────────────
