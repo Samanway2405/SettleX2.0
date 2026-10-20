@@ -14,7 +14,7 @@ type RawEventLike = {
   value?: unknown;
 };
 
-export function parsePaymentEvent(raw: rpc.Api.EventResponse): ContractPaymentEvent | null {
+export function parsePaymentEvent(raw: RawEventLike): ContractPaymentEvent | null {
   try {
     const topicScVals = Array.isArray(raw.topic) ? raw.topic : [];
     
