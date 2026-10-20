@@ -492,7 +492,8 @@ settlex/
 │   └── settlement/netBalance.ts  # Net-balance optimisation algorithm
 │
 ├── contract/
-│   └── src/lib.rs                # Soroban smart contract source (Rust)
+│   ├── contracts/settlement/      # Settlement contract crate and WASM
+│   └── contracts/pool/            # Pool contract crate and WASM
 │
 ├── __tests__/
 │   ├── split/calculator.test.ts
