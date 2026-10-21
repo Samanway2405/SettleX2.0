@@ -29,8 +29,11 @@ For **each** installed wallet (Freighter, xBull, Lobstr, Rabet):
 - [ ] **Reject** the signature → app shows "cancelled", no state change.
 - [ ] Pay the same share again → blocked as already settled.
 
-## 4. Realtime sync (needs Supabase)
-- [ ] Open the same trip in a second browser/user; a payment in one appears in the other without refresh.
+## 4. Cross-user sync (needs Supabase)
+- [ ] Open the same trip in a second browser/user; an expense or payment update appears in the other within about five seconds while the page is visible.
+- [ ] Hide the second browser tab, make a change, then return to it; it refreshes promptly without a manual reload.
+- [ ] In DevTools, confirm `/api/auth/verify` does not return an access token in its JSON body and the session cookie is HttpOnly.
+- [ ] Confirm Supabase REST requests go to the same-origin `/api/supabase/rest/v1/*` route, not directly to the Supabase URL.
 
 ## 5. PWA
 - [ ] `npm run build && npm run start`, open in Chrome → install prompt appears; install works and launches standalone with the correct icon.

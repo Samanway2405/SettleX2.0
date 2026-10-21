@@ -36,7 +36,7 @@ export const DEFAULT_SESSION_TTL_SECONDS = 60 * 60;
 /**
  * Warning window before token expiry, in seconds. The UI prompts the user to
  * re-sign with "Session expiring, sign to continue" within this window so
- * active queries and realtime subscriptions continue without interruption.
+ * authenticated API requests continue without interruption.
  */
 export const SESSION_REFRESH_SKEW_SECONDS = 5 * 60;
 
@@ -60,5 +60,5 @@ export const WALLET_CLAIM = "wallet_address";
  */
 export const AUTH_REQUEST_TIMEOUT_MS = 15_000;
 
-/** localStorage key holding the cached access token. */
+/** Legacy localStorage key removed during migration to the HttpOnly cookie. */
 export const LS_SESSION = "settlex:session";

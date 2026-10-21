@@ -173,7 +173,7 @@ crash that deep is always internal, so only the reference id is useful.
 | `*.rls_denied` (via `fields.kind`) | RLS rejected a write — auth or policy problem. |
 | `auth.session_handshake_failed` | A wallet could not establish a session; users are stuck on cached data. |
 | `auth.signup_failed` / `auth.signin_failed` | An unrecognised database failure blocked account creation or sign-in. |
-| `trip.realtime_failed` / `expense.realtime_failed` | Lists silently stop updating. |
+| `trip.poll_failed` / `expense.poll_failed` | Cross-user lists stop refreshing; the error is reported once until a refresh succeeds. |
 | `contract.fetch_events_failed` | Sustained = the Soroban RPC is down. |
 | `observability.no_error_provider` | This deployment has no error tracker wired up. |
 

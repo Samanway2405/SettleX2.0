@@ -4,6 +4,9 @@ import { test, expect } from '@playwright/test';
 test.describe('End-to-End Payment Flow on Testnet', () => {
   
   test('connect -> sign challenge -> create expense -> pay a share', async ({ page }) => {
+    const mockWallet = 'GBTESTPUBLICKEY...';
+    let isAuthenticated = false;
+
     // 1. Mock Freighter / WalletsKit in the browser context before navigating
     await page.addInitScript(() => {
       window.localStorage.setItem('wallet_network', 'TESTNET');
@@ -15,6 +18,37 @@ test.describe('End-to-End Payment Flow on Testnet', () => {
       };
     });
 
+    await page.route('**/api/auth/session', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          session: isAuthenticated
+            ? { walletAddress: mockWallet, expiresAt: Date.now() + 3600_000 }
+            : null,
+        },
+      });
+    });
+    await page.route('**/api/auth/challenge', async (route) => {
+      await route.fulfill({
+        status: 200,
+        json: {
+          transactionXdr: 'MOCK_CHALLENGE_XDR',
+          networkPassphrase: 'Test SDF Network ; September 2015',
+          challengeToken: 'MOCK_CHALLENGE',
+        },
+      });
+    });
+    await page.route('**/api/auth/verify', async (route) => {
+      isAuthenticated = true;
+      await route.fulfill({
+        status: 200,
+        headers: {
+          'Set-Cookie': 'settlex_session=MOCK_SESSION; Path=/; HttpOnly; SameSite=Lax',
+        },
+        json: { walletAddress: mockWallet, expiresAt: new Date(Date.now() + 3600_000).toISOString() },
+      });
+    });
+
     // 2. Navigate to the app
     await page.goto('/');
 
@@ -23,21 +57,6 @@ test.describe('End-to-End Payment Flow on Testnet', () => {
     if (await connectButton.isVisible()) {
       await connectButton.click();
     }
-    
-    // Depending on the auth flow, we might need to intercept the auth challenge POST
-    await page.route('**/api/auth/challenge', async (route) => {
-      await route.fulfill({
-        status: 200,
-        json: { challenge: 'MOCK_CHALLENGE' },
-      });
-    });
-
-    await page.route('**/api/auth/verify', async (route) => {
-      await route.fulfill({
-        status: 200,
-        json: { session: 'MOCK_SESSION', user: { wallet: 'GBTESTPUBLICKEY...' } },
-      });
-    });
 
     // If there is a sign message button
     const signButton = page.getByRole('button', { name: /Sign Challenge|Sign/i });
@@ -62,7 +81,7 @@ test.describe('End-to-End Payment Flow on Testnet', () => {
 
     // Submit expense
     // Intercept Supabase insert or assume test environment handles it
-    await page.route('**/rest/v1/expenses*', async (route) => {
+    await page.route('**/api/supabase/rest/v1/expenses*', async (route) => {
       if (route.request().method() === 'POST') {
         await route.fulfill({
           status: 201,
@@ -82,7 +101,7 @@ test.describe('End-to-End Payment Flow on Testnet', () => {
     await page.goto('/expenses/mock-expense-uuid');
     
     // Mock the contract submission and network response
-    await page.route('**/rpc/mark_share_paid*', async (route) => {
+    await page.route('**/api/supabase/rest/v1/rpc/mark_share_paid*', async (route) => {
       await route.fulfill({
         status: 200,
         json: []

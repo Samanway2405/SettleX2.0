@@ -3,7 +3,7 @@
  *
  * Revokes the caller's access token server-side, so "log out" actually
  * invalidates rather than only clearing the browser's copy. The token is read
- * from the Authorization header and must verify before anything is written —
+ * from an HttpOnly cookie and must verify before anything is written —
  * otherwise this endpoint would let anyone revoke anyone else's session.
  *
  * `everywhere: true` revokes every token issued to the wallet up to now, which
@@ -14,6 +14,7 @@
  */
 import { verifyJwt } from "@/lib/auth/jwt";
 import { WALLET_CLAIM } from "@/lib/auth/constants";
+import { clearSessionCookie, getSessionCookie } from "@/lib/auth/sessionCookie";
 import { clientKey, enforceRateLimit } from "@/lib/auth/rateLimit";
 import {
   RevocationUnavailable,
@@ -32,6 +33,14 @@ const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 export async function POST(request: Request) {
   const logger = requestLogger("POST /api/auth/signout", request);
+  const signoutResponse = (
+    body: unknown,
+    init: { status?: number; headers?: Record<string, string> } = {},
+  ) => {
+    const response = jsonWithCorrelation(logger, body, init);
+    clearSessionCookie(response);
+    return response;
+  };
 
   const limit = await enforceRateLimit(`signout:${clientKey(request)}`, 30, 60_000);
   if (!limit.allowed) {
@@ -44,13 +53,22 @@ export async function POST(request: Request) {
     );
   }
 
-  const header = request.headers.get("authorization") ?? "";
-  const token = header.toLowerCase().startsWith("bearer ") ? header.slice(7).trim() : "";
-  if (!token) {
-    logger.finish("auth.signout_completed", 401, { reason: "missing_token" });
+  const origin = request.headers.get("origin");
+  if (origin && origin !== new URL(request.url).origin) {
+    logger.warn("auth.signout_origin_rejected");
+    logger.finish("auth.signout_completed", 403, { reason: "cross_origin" });
     return jsonWithCorrelation(
       logger,
-      { error: "An access token is required." },
+      { error: "Cross-origin requests are not allowed." },
+      { status: 403, headers: NO_STORE },
+    );
+  }
+
+  const token = getSessionCookie(request);
+  if (!token) {
+    logger.finish("auth.signout_completed", 401, { reason: "missing_token" });
+    return signoutResponse(
+      { error: "An authenticated session is required." },
       { status: 401, headers: NO_STORE },
     );
   }
@@ -70,8 +88,7 @@ export async function POST(request: Request) {
     if (!claims) {
       logger.warn("auth.signout_rejected", { reason: "invalid_token" });
       logger.finish("auth.signout_completed", 401, { reason: "invalid_token" });
-      return jsonWithCorrelation(
-        logger,
+      return signoutResponse(
         { error: "That access token is not valid." },
         { status: 401, headers: NO_STORE },
       );
@@ -83,8 +100,7 @@ export async function POST(request: Request) {
     if (typeof walletAddress !== "string" || typeof exp !== "number") {
       logger.warn("auth.signout_rejected", { reason: "malformed_claims" });
       logger.finish("auth.signout_completed", 401, { reason: "malformed_claims" });
-      return jsonWithCorrelation(
-        logger,
+      return signoutResponse(
         { error: "That access token is not valid." },
         { status: 401, headers: NO_STORE },
       );
@@ -98,8 +114,7 @@ export async function POST(request: Request) {
         detail: "SUPABASE_SERVICE_ROLE_KEY is not set.",
       });
       logger.finish("auth.signout_completed", 503, { reason: "revocation_not_configured" });
-      return jsonWithCorrelation(
-        logger,
+      return signoutResponse(
         { error: "Server-side sign-out is not configured on this server." },
         { status: 503, headers: NO_STORE },
       );
@@ -112,8 +127,7 @@ export async function POST(request: Request) {
         // Tokens minted before `jti` existed cannot be denied individually.
         logger.warn("auth.signout_rejected", { walletAddress, reason: "no_jti" });
         logger.finish("auth.signout_completed", 409, { reason: "no_jti" });
-        return jsonWithCorrelation(
-          logger,
+        return signoutResponse(
           { error: "This session predates revocation support — sign out everywhere instead." },
           { status: 409, headers: NO_STORE },
         );
@@ -123,13 +137,12 @@ export async function POST(request: Request) {
 
     countMetric("auth.session_revoked", { everywhere });
     logger.finish("auth.signout_completed", 200, { walletAddress, everywhere });
-    return jsonWithCorrelation(logger, { revoked: true, everywhere }, { headers: NO_STORE });
+    return signoutResponse({ revoked: true, everywhere }, { headers: NO_STORE });
   } catch (err) {
     if (err instanceof AuthConfigError) {
       logger.error("auth.config_missing", err);
       logger.finish("auth.signout_completed", 503, { reason: "config_missing" });
-      return jsonWithCorrelation(
-        logger,
+      return signoutResponse(
         { error: "Wallet authentication is not configured on this server." },
         { status: 503, headers: NO_STORE },
       );
@@ -138,16 +151,14 @@ export async function POST(request: Request) {
       // Fail loudly: the browser must not report a sign-out that did not happen.
       logger.error("auth.revocation_failed", err);
       logger.finish("auth.signout_completed", 503, { reason: "revocation_unavailable" });
-      return jsonWithCorrelation(
-        logger,
+      return signoutResponse(
         { error: "Could not sign out. Please try again." },
         { status: 503, headers: { ...NO_STORE, "Retry-After": "5" } },
       );
     }
     logger.error("auth.signout_failed", err);
     logger.finish("auth.signout_completed", 500);
-    return jsonWithCorrelation(
-      logger,
+    return signoutResponse(
       { error: "Could not sign out." },
       { status: 500, headers: NO_STORE },
     );

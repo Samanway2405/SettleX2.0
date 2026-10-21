@@ -1,6 +1,7 @@
 import { POST } from "@/app/api/auth/signout/route";
 import * as rateLimitModule from "@/lib/auth/rateLimit";
 import { issueAccessToken } from "@/lib/auth/jwt";
+import { SESSION_COOKIE_NAME } from "@/lib/auth/sessionCookie";
 
 describe("POST /api/auth/signout", () => {
   const SECRET = "test-jwt-secret";
@@ -55,10 +56,11 @@ describe("POST /api/auth/signout", () => {
 
     const response = await POST(request);
     expect(enforceSpy).toHaveBeenCalledWith("signout:10.0.0.2", 30, 60_000);
-    // No Authorization header provided, returns 401
+    // No session cookie provided, returns 401 and clears any stale cookie.
     expect(response.status).toBe(401);
     const json = await response.json();
-    expect(json).toEqual({ error: "An access token is required." });
+    expect(json).toEqual({ error: "An authenticated session is required." });
+    expect(response.headers.get("set-cookie")).toContain(`${SESSION_COOKIE_NAME}=`);
   });
 
   it("successfully revokes token when authenticated", async () => {
@@ -83,7 +85,7 @@ describe("POST /api/auth/signout", () => {
     const request = new Request("http://localhost/api/auth/signout", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${token}`,
+        cookie: `${SESSION_COOKIE_NAME}=${token}`,
         "content-type": "application/json",
       },
       body: JSON.stringify({ everywhere: false }),
@@ -93,6 +95,6 @@ describe("POST /api/auth/signout", () => {
     expect(response.status).toBe(200);
     const json = await response.json();
     expect(json).toEqual({ revoked: true, everywhere: false });
+    expect(response.headers.get("set-cookie")).toContain(`${SESSION_COOKIE_NAME}=`);
   });
 });
-

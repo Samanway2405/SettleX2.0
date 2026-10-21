@@ -1,62 +1,47 @@
-# Authentication
+# Wallet Authentication
 
-## How it works today
+SettleX uses a Stellar wallet as the user's identity. A wallet signs a
+server-issued challenge, and the server verifies the signature before issuing a
+Supabase JWT with a `wallet_address` claim. Database RLS policies authorize
+requests from that verified claim.
 
-SettleX uses **wallet-based identity**. Flow ([context/AuthContext.tsx](../context/AuthContext.tsx)):
+## Session handling
 
-1. User connects a Stellar wallet → the app gets their public key (`G…`).
-2. **Sign up** inserts a row in the Supabase `users` table keyed by
-   `wallet_address`, with a display name.
-3. **Sign in** loads that row and updates `last_login_at`.
-4. Supabase calls go through `createAuthenticatedClient(publicKey)`
-   ([lib/supabase/client.ts](../lib/supabase/client.ts)), which attaches the
-   wallet address as a header used by RLS policies.
-5. The profile is cached in `localStorage` (`settlex:user`) so a refresh doesn't
-   flash logged-out.
+- `/api/auth/verify` sets the JWT in an `HttpOnly`, `SameSite=Lax` cookie. In
+  production it uses the `__Host-` cookie prefix with `Secure` and `Path=/`.
+  The verify response does not include the JWT in JSON.
+- The browser does not put the JWT in `localStorage` or expose it to the
+  Supabase client. It retains only the wallet address and expiry in memory for
+  UI state.
+- Supabase REST requests go through same-origin `/api/supabase/rest/v1/*`
+  handlers. The server validates the cookie before forwarding the request to
+  PostgREST with the JWT.
+- A valid cookie survives reloads. The browser can check its wallet and expiry
+  through `/api/auth/session` without receiving the token.
+- The session lasts one hour by default and can be configured with
+  `AUTH_SESSION_TTL_SECONDS` up to the 12-hour cap. Renewing it requires a new
+  wallet signature; the UI prompts before expiry.
+- Since Supabase Realtime WebSockets need a JWT in browser JavaScript, expense
+  and trip changes are polled every five seconds while a page is visible
+  instead. This is less immediate than Realtime but keeps the bearer token
+  private. HttpOnly prevents token extraction, not authenticated actions from
+  an active XSS running in the page.
+- Profile and offline app data may still be cached in `localStorage`; the
+  session JWT is not.
 
-There is **no password and no email** — the wallet is the account.
+## Server configuration
 
-## ⚠️ Known limitation (must fix before mainnet)
-
-> The wallet address is currently **client-supplied and not cryptographically
-> verified.** Nothing stops a client from claiming a wallet address it does not
-> control, because the app never asks the wallet to *prove* ownership by signing
-> a challenge. RLS built on that header is therefore only as strong as the
-> unproven header.
-
-This is fine for a testnet demo, **not** for a product handling real value.
-
-### The production fix: Sign-In With Stellar (challenge–response)
-1. Server issues a random nonce.
-2. The user's wallet **signs** the nonce (`kit.signTransaction` / a SEP-10-style
-   challenge transaction).
-3. Server **verifies** the signature matches the claimed public key, then issues
-   a short-lived session (e.g. a Supabase JWT).
-4. RLS policies key off that verified session identity — not a raw header.
-
-See §10.2 of [PRODUCT_CONVERSION_GUIDE.md](./PRODUCT_CONVERSION_GUIDE.md). This
-requires a small backend route (challenge issue + verify) and is the foundation
-for trustworthy RLS ([SUPABASE_SETUP.md](./SUPABASE_SETUP.md)).
-
-## Configuration
-Server-only env vars, all listed in
-[.env.local.example](../.env.local.example) — none may be prefixed
+Set these server-only environment variables; never prefix them with
 `NEXT_PUBLIC_`:
 
-- `SUPABASE_JWT_SECRET` — signs the access tokens RLS authorizes on.
-- `AUTH_CHALLENGE_SECRET` — binds a nonce to its wallet. **Required in
-  production**, where it must differ from `SUPABASE_JWT_SECRET`: the server
-  refuses to boot otherwise. Keeping the keys separate means a leak in one path
-  does not compromise the other, and rotating the JWT secret does not silently
-  invalidate every outstanding challenge. Outside production it falls back to
-  the JWT secret so a local checkout runs with one value set.
-- `AUTH_SESSION_TTL_SECONDS` — optional session lifetime, default 12h.
-- `SUPABASE_SERVICE_ROLE_KEY` — **required on any multi-instance deployment.**
-  It backs the shared replay guard and rate limiter (`auth_nonces`,
-  `auth_rate_limits`). Without it both fall back to per-process memory, so a
-  captured challenge can be replayed against another serverless instance within
-  the 60-second challenge TTL and the 30/min limit becomes 30/min *per
-  instance*.
+- `SUPABASE_JWT_SECRET` — signs the access token RLS authorizes on.
+- `AUTH_CHALLENGE_SECRET` — binds a challenge to its wallet. Required in
+  production and distinct from `SUPABASE_JWT_SECRET`.
+- `AUTH_SESSION_TTL_SECONDS` — optional session lifetime in seconds, default
+  3600, capped at 43200.
+- `SUPABASE_SERVICE_ROLE_KEY` — backs the shared challenge replay guard,
+  rate limiter, and server-side token revocation.
 
-Ensure the `users` table, its RLS policies and the auth shared-state tables from
-[supabase-setup.sql](../supabase-setup.sql) are loaded.
+Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` as well.
+Load the current schema and RLS policies from
+[`supabase-setup.sql`](../supabase-setup.sql).

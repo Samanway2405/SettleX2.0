@@ -13,6 +13,7 @@
  */
 import { isValidWalletAddress, verifyChallengeShared } from "@/lib/auth/challenge";
 import { issueAccessToken } from "@/lib/auth/jwt";
+import { setSessionCookie } from "@/lib/auth/sessionCookie";
 import { clientKey, enforceRateLimit } from "@/lib/auth/rateLimit";
 import {
   AuthConfigError,
@@ -114,11 +115,13 @@ export async function POST(request: Request) {
 
     countMetric("auth.session_issued");
     logger.finish("auth.verify_completed", 200, { walletAddress: result.walletAddress });
-    return jsonWithCorrelation(
+    const response = jsonWithCorrelation(
       logger,
-      { accessToken: token, expiresAt, walletAddress: result.walletAddress },
+      { expiresAt, walletAddress: result.walletAddress },
       { headers: NO_STORE },
     );
+    setSessionCookie(response, token, expiresAt);
+    return response;
   } catch (err) {
     if (err instanceof SharedStoreUnavailable) {
       // Fail closed: without the shared nonce store the single-use guard is
