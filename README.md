@@ -204,7 +204,7 @@ SettleX deploys a **Soroban smart contract** on Stellar Testnet as an immutable,
 | Pool contract | `CB4P4EXLGS56IXVNU3PLJO2BHF5BEEPBBYJAHXEPZDSD2OISQIGO53JA` | [View](https://stellar.expert/explorer/testnet/contract/CB4P4EXLGS56IXVNU3PLJO2BHF5BEEPBBYJAHXEPZDSD2OISQIGO53JA) |
 
 Network: Stellar Testnet  
-Language: Rust (`soroban-sdk` v21.7.6)
+Language: Rust (`soroban-sdk` v22.0.11)
 
 ### Verified On-Chain Transactions
 
@@ -215,6 +215,15 @@ Language: Rust (`soroban-sdk` v21.7.6)
 - Inter-contract settlement proof tx (`record_payment` + internal pool `withdraw`): [04c679c7ab7ec960db505038b4c6ec1f367e5d3caae013696bf3111e493de967](https://stellar.expert/explorer/testnet/tx/04c679c7ab7ec960db505038b4c6ec1f367e5d3caae013696bf3111e493de967)
 
 The final proof transaction above is verifiable evidence of the inter-contract path: settlement `record_payment` triggered pool `withdraw` in the same on-chain execution.
+
+New deployments must use [`scripts/deploy-contract.sh`](scripts/deploy-contract.sh).
+Both instances use Soroban constructors, so their admin state is initialized
+atomically during deployment. The script deploys the settlement instance,
+deploys the pool instance with the settlement address, and submits the
+admin-authenticated pool-reference update. Do not deploy the WASM and call
+`init` or `init_pool` manually; those legacy entry points reject calls after
+constructor initialization and are retained only for compatibility with older
+instances.
 
 Security hardening note:
 - Pool credits are now admin-managed in the pool contract to prevent untrusted self-crediting.
@@ -268,8 +277,16 @@ This section maps the required submission checklist to concrete proof in this re
 | Function                                                              | Type  | Purpose                                                 |
 | --------------------------------------------------------------------- | ----- | ------------------------------------------------------- |
 | `record_payment(trip_id, expense_id, payer, member, amount, tx_hash)` | Write | Stores payment record on-chain after XLM transfer       |
-| `get_payments(trip_id, offset, limit)`                                | Read  | Returns a bounded page of expense payment shards        |
+| `get_payments(trip_id, offset, limit)`                                | Read  | Returns a bounded page of payment history               |
 | `is_paid(expense_id, member)`                                         | Read  | Checks if a member has already settled a specific share |
+| `extend_trip(trip_id, payment_offset, expense_offset, limit)`         | Write | Permissionlessly renews TTLs for bounded history pages  |
+
+`get_payments` and `is_paid` are pure simulated reads; they do not renew
+storage TTLs. To keep history live, submit `extend_trip` as a real transaction
+(a keeper or any participant may submit it), then repeat with the returned
+payment and expense offsets until both are `None`. If an entry has already
+expired, include the archived footprint in the transaction so Soroban can
+restore it, or restore the trip's data before calling `extend_trip`.
 
 **Error codes handled by the frontend:**
 
