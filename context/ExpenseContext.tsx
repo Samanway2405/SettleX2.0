@@ -19,9 +19,11 @@ import type {
   RealtimePostgresChangesPayload,
   SupabaseClient,
 } from "@supabase/supabase-js";
+import type { Database, Json } from "@/types/supabase";
 import { useWalletContext } from "./WalletContext";
 import { logWarn, reportError } from "@/lib/observability/logger";
 import { supabaseErrorFields } from "@/lib/observability/supabaseError";
+import { parseExpenseRow } from "@/lib/supabase/rowGuards";
 
 
 /**
@@ -58,13 +60,16 @@ interface ExpenseContextType {
 const ExpenseContext = createContext<ExpenseContextType | null>(null);
 ExpenseContext.displayName = "ExpenseContext";
 
-function isRowForWallet(row: any, walletAddress: string | null): boolean {
-  if (!walletAddress) return false;
+function isRowForWallet(
+  row: Partial<Database["public"]["Tables"]["expenses"]["Row"]> | null | undefined,
+  walletAddress: string | null
+): boolean {
+  if (!walletAddress || !row) return false;
   return (
-    row?.created_by_wallet === walletAddress ||
-    (Array.isArray(row?.member_wallets) &&
+    row.created_by_wallet === walletAddress ||
+    (Array.isArray(row.member_wallets) &&
       row.member_wallets.includes(walletAddress) &&
-      Array.isArray(row?.accepted_wallets) &&
+      Array.isArray(row.accepted_wallets) &&
       row.accepted_wallets.includes(walletAddress))
   );
 }
@@ -89,7 +94,10 @@ function dbRowToExpense(row: unknown): Expense {
   return parseExpenseRow(row);
 }
 
-function expenseToDbInsertRow(expense: Expense, creatorWallet: string) {
+function expenseToDbInsertRow(
+  expense: Expense,
+  creatorWallet: string
+): Database["public"]["Tables"]["expenses"]["Insert"] {
   const memberWallets = expense.members
     .map((m) => m.walletAddress)
     .filter((addr): addr is string => !!addr);
@@ -107,14 +115,15 @@ function expenseToDbInsertRow(expense: Expense, creatorWallet: string) {
     currency: expense.currency,
     split_mode: expense.splitMode,
     paid_by_member_id: expense.paidByMemberId,
-    members: expense.members,
-    shares: expense.shares,
+    members: expense.members as unknown as Json,
+    shares: expense.shares as unknown as Json,
     created_at: expense.createdAt,
     settled: expense.settled,
     version: expense.version ?? 1,
     created_by_wallet: creatorWallet,
     member_wallets: allMemberWallets,
     accepted_wallets: [creatorWallet],
+    declined_wallets: [],
   };
 }
 
@@ -122,7 +131,7 @@ function expenseToDbInsertRow(expense: Expense, creatorWallet: string) {
 export function ExpenseProvider({ children }: { children: React.ReactNode }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [client, setClient] = useState<SupabaseClient | null>(null);
+  const [client, setClient] = useState<SupabaseClient<Database> | null>(null);
   const { publicKey, reconcile } = useWalletContext();
 
   // Every call is scoped by a JWT the server issues only after the wallet has
@@ -155,7 +164,7 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    getAuthenticatedClient(publicKey)
+    getAuthenticatedClient(publicKey, { interactive: false })
       .then((resolved) => {
         if (!cancelled) setClient(resolved);
       })
@@ -255,7 +264,11 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "expenses" },
-        (payload: RealtimePostgresChangesPayload<any>) => {
+        (
+          payload: RealtimePostgresChangesPayload<
+            Database["public"]["Tables"]["expenses"]["Row"]
+          >
+        ) => {
           const row = payload.new;
           if (!row) return;
           if (!isRowForWallet(row, publicKey)) {
@@ -278,7 +291,11 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       .on(
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "expenses" },
-        (payload: RealtimePostgresChangesPayload<any>) => {
+        (
+          payload: RealtimePostgresChangesPayload<
+            Database["public"]["Tables"]["expenses"]["Row"]
+          >
+        ) => {
           const row = payload.new;
           if (!row || !isRowForWallet(row, publicKey)) return;
           const updatedExpense = dbRowToExpense(row);
@@ -294,8 +311,13 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       .on(
         "postgres_changes",
         { event: "DELETE", schema: "public", table: "expenses" },
-        (payload: RealtimePostgresChangesPayload<any>) => {
-          const row = payload.old;
+        (
+          payload: RealtimePostgresChangesPayload<
+            Database["public"]["Tables"]["expenses"]["Row"]
+          >
+        ) => {
+          // `old` is typed `{}` for INSERT events; a DELETE carries the row.
+          const row = payload.old as Partial<Database["public"]["Tables"]["expenses"]["Row"]> | undefined;
           if (!row || !isRowForWallet(row, publicKey)) return;
           const deletedId = row?.id;
           if (!deletedId) return;
@@ -379,7 +401,7 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
 
         // Build partial update payload containing only mutable fields.
         // Never send created_by_wallet, created_at, or id in an UPDATE.
-        const dbUpdates: Record<string, any> = {};
+        const dbUpdates: Database["public"]["Tables"]["expenses"]["Update"] = {};
         if (updates.title !== undefined) dbUpdates.title = updates.title;
         if (updates.description !== undefined) dbUpdates.description = updates.description ?? null;
         if (updates.totalAmount !== undefined) dbUpdates.total_amount = updates.totalAmount;
@@ -387,13 +409,13 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
         if (updates.splitMode !== undefined) dbUpdates.split_mode = updates.splitMode;
         if (updates.paidByMemberId !== undefined) dbUpdates.paid_by_member_id = updates.paidByMemberId;
         if (updates.members !== undefined) {
-          dbUpdates.members = updates.members;
+          dbUpdates.members = updates.members as unknown as Json;
           const memberWallets = updates.members
             .map((m) => m.walletAddress)
             .filter((addr): addr is string => !!addr);
           dbUpdates.member_wallets = memberWallets;
         }
-        if (updates.shares !== undefined) dbUpdates.shares = updates.shares;
+        if (updates.shares !== undefined) dbUpdates.shares = updates.shares as unknown as Json;
         if (updates.settled !== undefined) dbUpdates.settled = updates.settled;
 
         // Guard the write with the version we based `merged` on. Without this
@@ -508,13 +530,22 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
       if (!current) throw new Error("Expense not found in state — please refresh and try again.");
 
       const cacheKey = publicKey ? getWalletScopedKey(LS_EXPENSES, publicKey) : LS_EXPENSES;
+      const nowIso = new Date().toISOString();
 
       // Optimistic local state update
       setExpenses((prev) => {
         const updated = prev.map((e) => {
           if (e.id !== expenseId) return e;
           const shares = e.shares.map((s) =>
-            s.memberId === memberId ? { ...s, paid: true, txHash } : s
+            s.memberId === memberId
+              ? {
+                  ...s,
+                  paid: true,
+                  txHash,
+                  paidBy: publicKey || s.paidBy,
+                  markedAt: s.markedAt || nowIso,
+                }
+              : s
           );
           const settled = shares.every((s) => s.paid);
           return { ...e, shares, settled };
@@ -536,7 +567,11 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
               p_tx_hash: txHash,
             });
 
-          if (!rpcErr && rpcData && rpcData.length > 0) {
+          if (rpcErr) {
+            throw rpcErr;
+          }
+
+          if (rpcData && rpcData.length > 0) {
             const updatedRow = dbRowToExpense(rpcData[0]);
             setExpenses((prev) => {
               const synced = prev.map((e) => (e.id === expenseId ? updatedRow : e));
@@ -546,6 +581,15 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
             rpcSucceeded = true;
           }
         } catch (rpcErr) {
+          const errMsg = (rpcErr as { message?: string })?.message || "";
+          if (
+            errMsg.includes("already marked as paid") ||
+            errMsg.includes("already used on another") ||
+            errMsg.includes("Valid transaction hash is required") ||
+            errMsg.includes("Not authorized")
+          ) {
+            throw rpcErr;
+          }
           logWarn("expense.mark_share_paid_rpc_unavailable", {
             fields: { expenseId, ...supabaseErrorFields(rpcErr) },
           });
@@ -571,7 +615,15 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
 
           // Merge: preserve any other members marked paid concurrently
           const freshShares = existingShares.map((s: SplitShare) =>
-            s.memberId === memberId ? { ...s, paid: true, txHash } : s
+            s.memberId === memberId
+              ? {
+                  ...s,
+                  paid: true,
+                  txHash,
+                  paidBy: publicKey || s.paidBy,
+                  markedAt: s.markedAt || nowIso,
+                }
+              : s
           );
           const freshSettled = freshShares.every((s: SplitShare) => s.paid);
 
@@ -579,7 +631,7 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
           const { data: rowsUpdated, error: updateErr } = await client
             .from("expenses")
             .update({
-              shares: freshShares,
+              shares: freshShares as unknown as Json,
               settled: freshSettled,
               version: currentVersion + 1,
             })
@@ -594,7 +646,7 @@ export function ExpenseProvider({ children }: { children: React.ReactNode }) {
               const { data: fallbackRows, error: fallbackErr } = await client
                 .from("expenses")
                 .update({
-                  shares: freshShares,
+                  shares: freshShares as unknown as Json,
                   settled: freshSettled,
                 })
                 .eq("id", expenseId)

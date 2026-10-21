@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useContext, useState } from "react";
 import { Plus, Trash2, UserPlus } from "lucide-react";
 import type { Member } from "@/types/expense";
 import type { TripFormData } from "@/types/trip";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
+import { AuthContext } from "@/context/AuthContext";
 
 interface TripFormProps {
   onSubmit: (data: TripFormData) => void;
@@ -16,6 +17,8 @@ interface TripFormProps {
   /** Prefill the first member's name from authenticated user */
   currentUserName?: string | null;
 }
+
+const MAX_MEMBERS = 50;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -44,6 +47,11 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // ── User profile resolution ─────────────────────────────────────────────────
+  const authContext = useContext(AuthContext);
+  const resolveUserProfile = authContext?.resolveUserProfile;
+  const [resolvedProfiles, setResolvedProfiles] = useState<Record<string, string>>({});
+
   // ── Member mutations ───────────────────────────────────────────────────────
 
   const updateMember = (id: string, field: keyof Member, value: string) => {
@@ -52,7 +60,34 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
     );
   };
 
-  const addMember = () => setMembers((prev) => [...prev, createMember()]);
+  const handleMemberAddressChange = useCallback(
+    async (id: string, address: string) => {
+      updateMember(id, "walletAddress", address);
+      const trimmed = address.trim();
+      if (!resolveUserProfile || !/^G[A-Z2-7]{55}$/.test(trimmed)) return;
+      try {
+        const verifiedName = await resolveUserProfile(trimmed);
+        if (verifiedName) {
+          setResolvedProfiles((prev) => ({ ...prev, [trimmed]: verifiedName }));
+          setMembers((prev) =>
+            prev.map((m) =>
+              m.id === id && (!m.name.trim() || m.name.startsWith("Member"))
+                ? { ...m, name: verifiedName }
+                : m
+            )
+          );
+        }
+      } catch {
+        // ignore profile resolution failure
+      }
+    },
+    [resolveUserProfile]
+  );
+
+  const addMember = () => {
+    if (members.length >= MAX_MEMBERS) return;
+    setMembers((prev) => [...prev, createMember()]);
+  };
 
   const removeMember = (id: string) => {
     if (members.length <= 2) return;
@@ -63,11 +98,35 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
 
   const validate = (): boolean => {
     const errs: Record<string, string> = {};
-    if (!name.trim()) errs.name = "Trip name is required";
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      errs.name = "Trip name is required";
+    } else if (trimmedName.length > 120) {
+      errs.name = "Trip name cannot exceed 120 characters";
+    }
+
+    if (description.trim().length > 100) {
+      errs.description = "Description cannot exceed 100 characters";
+    }
+
     const namedMembers = members.filter((m) => m.name.trim());
-    if (namedMembers.length < 2) errs.members = "Add at least 2 members";
+    if (namedMembers.length < 2) {
+      errs.members = "Add at least 2 members";
+    } else if (members.length > MAX_MEMBERS) {
+      errs.members = "Maximum 50 members allowed";
+    }
+
     members.forEach((m, i) => {
-      if (!m.name.trim()) return;
+      const trimmedMemberName = m.name.trim();
+      if (!trimmedMemberName) {
+        if (i < 2) {
+          errs[`member_name_${i}`] = "Name is required.";
+        }
+        return;
+      }
+      if (trimmedMemberName.length > 50) {
+        errs[`member_name_${i}`] = "Name cannot exceed 50 characters.";
+      }
       if (!m.walletAddress?.trim())
         errs[`member_addr_${i}`] = "Stellar address is required.";
       else if (!/^G[A-Z2-7]{55}$/.test(m.walletAddress.trim()))
@@ -100,6 +159,7 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
         label="Trip name"
         placeholder="e.g. Bali 2025, Euro Trip"
         value={name}
+        maxLength={120}
         onChange={(e) => setName(e.target.value)}
         error={errors.name}
         required
@@ -110,7 +170,9 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
         label="Description"
         placeholder="Add a short note about this trip"
         value={description}
+        maxLength={100}
         onChange={(e) => setDescription(e.target.value)}
+        error={errors.description}
       />
 
       {/* Members */}
@@ -122,7 +184,13 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
           <button
             type="button"
             onClick={addMember}
-            className="flex items-center gap-1 text-xs font-semibold text-[#888] hover:text-[#0F0F14] transition-colors"
+            disabled={members.length >= MAX_MEMBERS}
+            className={cn(
+              "flex items-center gap-1 text-xs font-semibold transition-colors",
+              members.length >= MAX_MEMBERS
+                ? "text-[#CCC] cursor-not-allowed"
+                : "text-[#888] hover:text-[#0F0F14]"
+            )}
           >
             <UserPlus size={12} />
             Add member
@@ -140,7 +208,9 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
                 <Input
                   placeholder={`Member ${i + 1} name`}
                   value={member.name}
+                  maxLength={50}
                   onChange={(e) => updateMember(member.id, "name", e.target.value)}
+                  error={errors[`member_name_${i}`]}
                   required={i < 2}
                 />
                 <div className="flex flex-col gap-0.5">
@@ -148,10 +218,35 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
                     placeholder="G… Stellar address *"
                     value={member.walletAddress ?? ""}
                     onChange={(e) =>
-                      updateMember(member.id, "walletAddress", e.target.value)
+                      handleMemberAddressChange(member.id, e.target.value)
                     }
                     error={errors[`member_addr_${i}`]}
                   />
+                  {(() => {
+                    const addr = member.walletAddress?.trim();
+                    if (!addr || !/^G[A-Z2-7]{55}$/.test(addr)) return null;
+                    const verifiedName = resolvedProfiles[addr];
+                    if (!verifiedName) return null;
+                    if (member.name === verifiedName) {
+                      return (
+                        <p className="text-[11px] text-emerald-600 font-medium px-1">
+                          ✓ Verified user profile: {verifiedName}
+                        </p>
+                      );
+                    }
+                    return (
+                      <div className="flex items-center gap-1.5 text-[11px] text-[#555] px-1">
+                        <span>Verified profile: <strong>{verifiedName}</strong></span>
+                        <button
+                          type="button"
+                          onClick={() => updateMember(member.id, "name", verifiedName)}
+                          className="text-xs text-blue-600 underline hover:text-blue-800"
+                        >
+                          Use verified name
+                        </button>
+                      </div>
+                    );
+                  })()}
                   {!errors[`member_addr_${i}`] && (
                     <p className="text-[10px] text-[#AAA] px-1">Required — used to send XLM payment</p>
                   )}
@@ -177,7 +272,13 @@ export function TripForm({ onSubmit, onCancel, initialData, currentUserPublicKey
         <button
           type="button"
           onClick={addMember}
-          className="mt-2 w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl border border-dashed border-[#D0D0D0] text-sm text-[#AAA] hover:border-[#B9FF66] hover:text-[#555] transition-all"
+          disabled={members.length >= MAX_MEMBERS}
+          className={cn(
+            "mt-2 w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl border border-dashed text-sm transition-all",
+            members.length >= MAX_MEMBERS
+              ? "border-[#E5E5E5] text-[#CCC] cursor-not-allowed"
+              : "border-[#D0D0D0] text-[#AAA] hover:border-[#B9FF66] hover:text-[#555]"
+          )}
         >
           <Plus size={13} />
           Add another member

@@ -86,14 +86,26 @@ export async function revokeToken(params: {
 /**
  * Denies every token issued to a wallet before `now` — the "sign out
  * everywhere" case, and the one to reach for if a device is lost.
+ *
+ * @param walletAddress The Stellar address to revoke
+ * @param ttlSeconds Optional tombstone lifetime in seconds. When omitted,
+ *                   the database defaults to 13 hours (outliving the 12h session cap).
  */
-export async function revokeWallet(walletAddress: string): Promise<number> {
+export async function revokeWallet(
+  walletAddress: string,
+  ttlSeconds?: number,
+): Promise<number> {
   try {
-    return await rpc<number>("settlex_revoke_wallet", {
+    const params: { p_wallet_address: string; p_ttl_seconds?: number } = {
       p_wallet_address: walletAddress,
-    });
+    };
+    if (typeof ttlSeconds === "number" && ttlSeconds > 0) {
+      params.p_ttl_seconds = ttlSeconds;
+    }
+    return await rpc<number>("settlex_revoke_wallet", params);
   } catch (err) {
     if (err instanceof RevocationUnavailable) throw err;
     throw new RevocationUnavailable(String(err));
   }
 }
+

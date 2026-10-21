@@ -14,6 +14,9 @@ export interface SplitShare {
   amount: string;
   paid: boolean;
   txHash?: string;
+  paidBy?: string;
+  markedAt?: string;
+  manual?: boolean;
 }
 
 export interface Expense {
@@ -32,6 +35,7 @@ export interface Expense {
   createdByWallet?: string;
   memberWallets?: string[];
   acceptedWallets?: string[];
+  declinedWallets?: string[];
 }
 
 export type ExpenseFormData = {

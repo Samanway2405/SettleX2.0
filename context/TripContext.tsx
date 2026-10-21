@@ -19,6 +19,7 @@ import type {
   RealtimePostgresChangesPayload,
   SupabaseClient,
 } from "@supabase/supabase-js";
+import type { Database, Json } from "@/types/supabase";
 import { useWalletContext } from "./WalletContext";
 import { parseTripRow } from "@/lib/supabase/rowGuards";
 import { logWarn, reportError } from "@/lib/observability/logger";
@@ -60,13 +61,16 @@ interface TripContextType {
 const TripContext = createContext<TripContextType | null>(null);
 TripContext.displayName = "TripContext";
 
-function isRowForWallet(row: any, walletAddress: string | null): boolean {
-  if (!walletAddress) return false;
+function isRowForWallet(
+  row: Partial<Database["public"]["Tables"]["trips"]["Row"]> | null | undefined,
+  walletAddress: string | null
+): boolean {
+  if (!walletAddress || !row) return false;
   return (
-    row?.created_by_wallet === walletAddress ||
-    (Array.isArray(row?.member_wallets) &&
+    row.created_by_wallet === walletAddress ||
+    (Array.isArray(row.member_wallets) &&
       row.member_wallets.includes(walletAddress) &&
-      Array.isArray(row?.accepted_wallets) &&
+      Array.isArray(row.accepted_wallets) &&
       row.accepted_wallets.includes(walletAddress))
   );
 }
@@ -84,7 +88,10 @@ function dbRowToTrip(row: unknown): Trip {
   return parseTripRow(row);
 }
 
-function tripToDbInsertRow(trip: Trip, creatorWallet: string) {
+function tripToDbInsertRow(
+  trip: Trip,
+  creatorWallet: string
+): Database["public"]["Tables"]["trips"]["Insert"] {
   const memberWallets = trip.members
     .map((m) => m.walletAddress)
     .filter((addr): addr is string => !!addr);
@@ -97,13 +104,14 @@ function tripToDbInsertRow(trip: Trip, creatorWallet: string) {
     id: trip.id,
     name: trip.name,
     description: trip.description ?? null,
-    members: trip.members,
+    members: trip.members as unknown as Json,
     expense_ids: trip.expenseIds,
     created_at: trip.createdAt,
     settled: trip.settled,
     created_by_wallet: creatorWallet,
     member_wallets: allMemberWallets,
     accepted_wallets: [creatorWallet],
+    declined_wallets: [],
   };
 }
 
@@ -111,7 +119,7 @@ function tripToDbInsertRow(trip: Trip, creatorWallet: string) {
 export function TripProvider({ children }: { children: React.ReactNode }) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [client, setClient] = useState<SupabaseClient | null>(null);
+  const [client, setClient] = useState<SupabaseClient<Database> | null>(null);
   const { publicKey, reconcile } = useWalletContext();
 
   // Every call is scoped by a JWT the server issues only after the wallet has
@@ -144,7 +152,7 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    getAuthenticatedClient(publicKey)
+    getAuthenticatedClient(publicKey, { interactive: false })
       .then((resolved) => {
         if (!cancelled) setClient(resolved);
       })
@@ -243,7 +251,11 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "trips" },
-        (payload: RealtimePostgresChangesPayload<any>) => {
+        (
+          payload: RealtimePostgresChangesPayload<
+            Database["public"]["Tables"]["trips"]["Row"]
+          >
+        ) => {
           const row = payload.new;
           if (!row) return;
           if (!isRowForWallet(row, publicKey)) {
@@ -266,7 +278,11 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
       .on(
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "trips" },
-        (payload: RealtimePostgresChangesPayload<any>) => {
+        (
+          payload: RealtimePostgresChangesPayload<
+            Database["public"]["Tables"]["trips"]["Row"]
+          >
+        ) => {
           const row = payload.new;
           if (!row || !isRowForWallet(row, publicKey)) return;
           const updatedTrip = dbRowToTrip(row);
@@ -282,8 +298,13 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
       .on(
         "postgres_changes",
         { event: "DELETE", schema: "public", table: "trips" },
-        (payload: RealtimePostgresChangesPayload<any>) => {
-          const row = payload.old;
+        (
+          payload: RealtimePostgresChangesPayload<
+            Database["public"]["Tables"]["trips"]["Row"]
+          >
+        ) => {
+          // `old` is typed `{}` for INSERT events; a DELETE carries the row.
+          const row = payload.old as Partial<Database["public"]["Tables"]["trips"]["Row"]> | undefined;
           if (!row || !isRowForWallet(row, publicKey)) return;
           const deletedId = row?.id;
           if (!deletedId) return;
@@ -365,11 +386,11 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
 
         // Build partial update payload containing only mutable fields.
         // Never send created_by_wallet, created_at, or id in an UPDATE.
-        const dbUpdates: Record<string, any> = {};
+        const dbUpdates: Database["public"]["Tables"]["trips"]["Update"] = {};
         if (updates.name !== undefined) dbUpdates.name = updates.name;
         if (updates.description !== undefined) dbUpdates.description = updates.description ?? null;
         if (updates.members !== undefined) {
-          dbUpdates.members = updates.members;
+          dbUpdates.members = updates.members as unknown as Json;
           const memberWallets = updates.members
             .map((m) => m.walletAddress)
             .filter((addr): addr is string => !!addr);
@@ -455,12 +476,56 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const client = await getClient();
-        const { error } = await client
-          .from("trips")
-          .update({ expense_ids: expenseIds })
-          .eq("id", tripId);
 
-        if (error) throw error;
+        // 1. Primary path: Call validated server-side RPC add_expense_to_trip
+        let rpcSucceeded = false;
+        try {
+          const { error: rpcErr } = await client.rpc("add_expense_to_trip", {
+            p_trip_id: tripId,
+            p_expense_id: expenseId,
+          });
+
+          if (rpcErr) {
+            const msg = rpcErr.message || "";
+            if (
+              msg.includes("Cannot link foreign expense") ||
+              msg.includes("Not authorized") ||
+              msg.includes("Invalid expense ID") ||
+              msg.includes("Cannot add expenses to a settled trip")
+            ) {
+              throw rpcErr;
+            }
+          } else {
+            rpcSucceeded = true;
+          }
+        } catch (rpcErr) {
+          const msg = (rpcErr as { message?: string })?.message || "";
+          if (
+            msg.includes("Cannot link foreign expense") ||
+            msg.includes("Not authorized") ||
+            msg.includes("Invalid expense ID") ||
+            msg.includes("Cannot add expenses to a settled trip")
+          ) {
+            throw rpcErr;
+          }
+          logWarn("trip.add_expense_rpc_unavailable", {
+            fields: { tripId, ...supabaseErrorFields(rpcErr) },
+          });
+        }
+
+        // 2. Fallback path: Direct update if RPC not present in environment
+        if (!rpcSucceeded) {
+          const { error } = await client
+            .from("trips")
+            .update({ expense_ids: expenseIds })
+            .eq("id", tripId);
+
+          if (error) throw error;
+        }
+
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("settlex:consent-changed"));
+        }
       } catch (err) {
         reportError("trip.add_expense_failed", err, {
           fields: { tripId, ...supabaseErrorFields(err) },
@@ -474,7 +539,7 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
         throw err;
       }
     },
-    [trips, getClient]
+    [trips, getClient, publicKey]
   );
 
   const settleTrip = useCallback(

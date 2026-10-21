@@ -32,8 +32,10 @@ jest.mock("@/lib/supabase/session", () => ({
 }));
 
 let mockPublicKey: string | null = null;
+// Stable across renders: getClient lists `reconcile` as a dependency.
+const mockReconcile = jest.fn(async () => {});
 jest.mock("@/context/WalletContext", () => ({
-  useWalletContext: () => ({ publicKey: mockPublicKey }),
+  useWalletContext: () => ({ publicKey: mockPublicKey, reconcile: mockReconcile }),
 }));
 
 const { getAuthenticatedClient, readStoredSession } = require("@/lib/supabase/session");
@@ -48,6 +50,8 @@ const SECRET_EXPENSE = {
   title: "Wallet A private dinner",
   amount: 420,
   paidBy: WALLET_A,
+  // Cached rows must name the wallet as creator or accepted member to render.
+  createdByWallet: WALLET_A,
   shares: [],
   createdAt: "2026-01-01T00:00:00Z",
 };
@@ -55,6 +59,7 @@ const SECRET_EXPENSE = {
 const SECRET_TRIP = {
   id: "trip-1",
   name: "Wallet A private trip",
+  createdByWallet: WALLET_A,
   members: [],
   expenseIds: [],
   createdAt: "2026-01-01T00:00:00Z",

@@ -12,6 +12,12 @@
 import { LS_SESSION, SESSION_REFRESH_SKEW_SECONDS, WALLET_CLAIM } from "@/lib/auth/constants";
 import { readStoredSession } from "@/lib/supabase/session";
 
+// session.ts imports the signer, which loads the ESM-only wallet kit. Nothing
+// here signs, so stub it as the other session tests do.
+jest.mock("@/lib/freighter", () => ({
+  signXDR: jest.fn(),
+}));
+
 const VICTIM = "GDQNY3PBOJOKYZSRMK2S7LHHGWZIUISD4QORETLMXEWXBI7KFZZMKTL3";
 const ATTACKER = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
 
@@ -77,15 +83,15 @@ describe("readStoredSession", () => {
     expect(readStoredSession(VICTIM)?.expiresAt).toBe(exp * 1000);
   });
 
-  it("treats a token inside the refresh skew as stale so it re-signs early", () => {
-    const almostGone = Math.floor(Date.now() / 1000) + SESSION_REFRESH_SKEW_SECONDS - 5;
+  it("keeps a token inside the refresh skew valid so requests do not fail early", () => {
+    const insideSkew = Math.floor(Date.now() / 1000) + SESSION_REFRESH_SKEW_SECONDS - 5;
     store({
       walletAddress: VICTIM,
-      accessToken: tokenFor(VICTIM, almostGone),
+      accessToken: tokenFor(VICTIM, insideSkew),
       expiresAt: Date.now() + 86_400_000,
     });
 
-    expect(readStoredSession(VICTIM)).toBeNull();
+    expect(readStoredSession(VICTIM)?.walletAddress).toBe(VICTIM);
   });
 
   it("rejects blobs with a malformed or missing token", () => {

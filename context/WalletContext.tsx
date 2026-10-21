@@ -174,38 +174,58 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   // read. A switch mid-session must not leave the app acting as the old account
   // while the wallet signs as the new one.
 
+  // The key the provider currently holds. A silent read that resolves after the
+  // user has disconnected or reconnected must not clear the newer session.
+  const publicKeyRef = useRef(publicKey);
+  useEffect(() => {
+    publicKeyRef.current = publicKey;
+  }, [publicKey]);
+
   const reconcile = useCallback(async () => {
     if (!publicKey) return;
-    const liveKey = await getWalletsKit()
-      .getAddressSilently()
-      .catch(() => null);
+    // Ask the wallet the user connected with, not whichever one the shared kit
+    // was last pointed at.
+    const kit = getWalletsKit();
+    kit.setWallet((selectedWalletId ?? FREIGHTER_ID) as WalletId);
+    const liveKey = await kit.getAddressSilently().catch(() => null);
 
     if (!liveKey || liveKey === publicKey) return;
+    if (publicKeyRef.current !== publicKey) return;
 
     clearStoredWallet(publicKey);
     setPublicKey(null);
     setBalance(null);
     setNetwork(null);
+    setNetworkStatus("idle");
     setSelectedWalletId(null);
     toastInfo(
       "Wallet account changed",
       "Please reconnect to continue with your current account."
     );
-  }, [publicKey, toastInfo]);
+  }, [publicKey, selectedWalletId, toastInfo]);
 
   useEffect(() => {
     if (!publicKey) return;
 
-      clearStoredWallet(publicKey);
-      setPublicKey(null);
-      setBalance(null);
-      setNetwork(null);
-      setNetworkStatus("idle");
-      setSelectedWalletId(null);
-      toastInfo(
-        "Wallet account changed",
-        "Please reconnect to continue with your current account."
-      );
+    const walletId = (selectedWalletId ?? FREIGHTER_ID) as WalletId;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    // A network switch in the wallet is as silent as an account switch, so
+    // re-read both on every poll.
+    const check = () => {
+      void Promise.all([
+        reconcile(),
+        checkWalletNetwork(walletId, false),
+      ]).catch(() => {
+        // Both reads fail closed on their own; never surface a poll rejection.
+      });
+    };
+
+    const tick = () => {
+      check();
+      // Back off interval when the tab is hidden
+      const delay = document.visibilityState === "hidden" ? 30_000 : 5_000;
+      timeoutId = setTimeout(tick, delay);
     };
 
     timeoutId = setTimeout(tick, 5_000);
@@ -213,7 +233,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
         clearTimeout(timeoutId);
-        void reconcile();
+        check();
         timeoutId = setTimeout(tick, 5_000);
       }
     };
@@ -223,7 +243,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       clearTimeout(timeoutId);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [checkWalletNetwork, publicKey, selectedWalletId, toastInfo]);
+  }, [checkWalletNetwork, publicKey, reconcile, selectedWalletId]);
 
   useEffect(() => {
     if (!publicKey) return;

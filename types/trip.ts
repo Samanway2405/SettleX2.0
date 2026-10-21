@@ -10,6 +10,7 @@ export interface Trip {
   createdByWallet?: string;
   memberWallets?: string[];
   acceptedWallets?: string[];
+  declinedWallets?: string[];
   settled: boolean;
 }
 

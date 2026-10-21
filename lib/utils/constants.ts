@@ -47,6 +47,8 @@ export const TX_BASE_FEE        = 100;
 export const TX_TIMEOUT_SECONDS = 180;
 export const TX_MAX_FEE_STROOPS = 10_000;
 export const MEMO_MAX_BYTES     = 28;
+export const MIN_SPLIT_WEIGHT   = 1;
+export const MAX_SPLIT_WEIGHT   = 1000;
 
 export const LS_PUBLIC_KEY = "settlex:publicKey";
 export const LS_WALLET_ID  = "settlex:walletId";

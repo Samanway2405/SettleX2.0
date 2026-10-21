@@ -74,6 +74,20 @@ export async function POST(request: Request) {
     );
   }
 
+  const walletLimit = await enforceRateLimit(`verify:wallet:${walletAddress}`, 15, 60_000);
+  if (!walletLimit.allowed) {
+    logger.warn("auth.verify_wallet_rate_limited", {
+      walletAddress,
+      retryAfter: walletLimit.retryAfter,
+    });
+    logger.finish("auth.verify_completed", 429);
+    return jsonWithCorrelation(
+      logger,
+      { error: "Too many authentication attempts for this wallet. Please wait a moment." },
+      { status: 429, headers: { ...NO_STORE, "Retry-After": String(walletLimit.retryAfter) } },
+    );
+  }
+
   try {
     const result = await verifyChallengeShared({
       walletAddress,

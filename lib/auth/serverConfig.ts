@@ -49,6 +49,17 @@ export function getChallengeSecret(): string {
   return getJwtSecret();
 }
 
+/**
+ * Maximum session lifetime cap (12 hours = 43200s).
+ *
+ * NOTE: The database tombstone in `settlex_revoke_wallet` (supabase-setup.sql)
+ * defaults to 13 hours (46800s) to strictly outlive this cap so revoked tokens
+ * cannot become valid again before expiring. If MAX_SESSION_TTL_CAP_SECONDS is
+ * ever changed, the revocation tombstone duration in `settlex_revoke_wallet`
+ * must be updated accordingly to exceed this value.
+ */
+export const MAX_SESSION_TTL_CAP_SECONDS = 12 * 60 * 60;
+
 /** Lifetime of an issued access token, in seconds. */
 export function getSessionTtlSeconds(): number {
   const raw = process.env.AUTH_SESSION_TTL_SECONDS;
@@ -60,8 +71,12 @@ export function getSessionTtlSeconds(): number {
   // Cap at 12h so a typo cannot mint a near-permanent token. Tokens are
   // bearer credentials for a money app; the denylist only helps for sessions
   // the user explicitly signs out of, so the ceiling stays low.
-  return Math.min(Math.floor(parsed), 12 * 60 * 60);
+  //
+  // NOTE: This cap must stay strictly less than the revocation tombstone TTL
+  // (13 hours in settlex_revoke_wallet, supabase-setup.sql).
+  return Math.min(Math.floor(parsed), MAX_SESSION_TTL_CAP_SECONDS);
 }
+
 
 /**
  * Validates every auth secret at once, for the boot-time check in

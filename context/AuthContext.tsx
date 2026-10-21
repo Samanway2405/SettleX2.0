@@ -10,11 +10,17 @@ import React, {
 import {
   clearWalletSession,
   getAuthenticatedClient,
+  getSessionExpiryInfo,
+  onSessionChange,
   requireAuthenticatedClient,
 } from "@/lib/supabase/session";
 import { useWalletContext } from "./WalletContext";
 import { getWalletScopedKey, LS_PUBLIC_KEY, LS_USER } from "@/lib/utils/constants";
 import { parseUserRow } from "@/lib/supabase/rowGuards";
+import { useToast } from "@/components/ui/Toast";
+import { reportError } from "@/lib/observability/logger";
+import { supabaseErrorFields } from "@/lib/observability/supabaseError";
+import { userFacingMessage } from "@/lib/errors/userMessage";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,12 +43,23 @@ interface AuthContextType {
    * so the UI should ask the user to re-authenticate rather than carry on.
    */
   sessionError: string | null;
+  /** Whether the session is inside the expiry warning window or has expired. */
+  isSessionExpiring: boolean;
+  /** Whether the session has passed its expiration time. */
+  isSessionExpired: boolean;
+  /** Seconds until the session expires, or 0 if expired, or null if unauthenticated. */
+  sessionSecondsRemaining: number | null;
+  /** True while the user is confirming a re-auth signature prompt. */
+  isSigningToContinue: boolean;
+  /** Prompts the wallet to sign and re-authenticate an expiring or expired session. */
+  signToContinue: () => Promise<void>;
   signUp: (displayName: string) => Promise<void>;
   signIn: () => Promise<void>;
-  signOut: () => void;
+  signOut: () => Promise<void>;
   /** Re-runs the wallet signing handshake. */
   refreshSession: () => Promise<void>;
   updateProfile: (updates: Partial<Pick<User, "displayName">>) => Promise<void>;
+  resolveUserProfile: (walletAddress: string) => Promise<string | null>;
 }
 
 // ─── Context ──────────────────────────────────────────────────────────────────
@@ -124,6 +141,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Set only after the wallet has signed a server-issued challenge and the
   // server has minted a token for this exact address.
   const [verifiedWallet, setVerifiedWallet] = useState<string | null>(null);
+  const [isSessionExpiring, setIsSessionExpiring] = useState(false);
+  const [isSessionExpired, setIsSessionExpired] = useState(false);
+  const [sessionSecondsRemaining, setSessionSecondsRemaining] = useState<number | null>(null);
+  const [isSigningToContinue, setIsSigningToContinue] = useState(false);
   const { publicKey, isConnected, isHydrated } = useWalletContext();
 
   // Authorization rests on the verified token, never on cached state. Writing
@@ -207,6 +228,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loadUser(publicKey);
   }, [publicKey, isHydrated, sessionNonce]);
 
+  // ── Monitor session expiry for proactive warning and prompt ───────────────
+
+  useEffect(() => {
+    if (!publicKey || !verifiedWallet || verifiedWallet !== publicKey) {
+      setIsSessionExpiring(false);
+      setIsSessionExpired(false);
+      setSessionSecondsRemaining(null);
+      return;
+    }
+
+    const checkExpiry = () => {
+      const info = getSessionExpiryInfo(publicKey);
+      if (!info) {
+        setIsSessionExpiring(false);
+        setIsSessionExpired(false);
+        setSessionSecondsRemaining(null);
+        return;
+      }
+
+      setSessionSecondsRemaining(info.secondsRemaining);
+      setIsSessionExpired(info.isExpired);
+      setIsSessionExpiring(info.isExpiringSoon || info.isExpired);
+    };
+
+    checkExpiry();
+    const interval = setInterval(checkExpiry, 5000);
+    const unsubscribe = onSessionChange(checkExpiry);
+
+    return () => {
+      clearInterval(interval);
+      unsubscribe();
+    };
+  }, [publicKey, verifiedWallet]);
+
   // ── Sign up: Create new user profile ──────────────────────────────────────
 
   const signUp = useCallback(
@@ -217,6 +272,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (!displayName || !displayName.trim()) {
         throw new Error("Display name is required");
+      }
+
+      if (displayName.trim().length > 50) {
+        throw new Error("Display name cannot exceed 50 characters");
       }
 
       try {
@@ -236,6 +295,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (error) {
           if (error.code === '23505') {
             throw new Error("This wallet is already registered. Please sign in instead.");
+          } else if (error.code === '23514') {
+            throw new Error("Display name must be between 1 and 50 characters.");
           } else if (error.message.includes('permission denied') || error.message.includes('policy')) {
             throw new Error("Access denied. Please make sure your database is properly configured.");
           } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
@@ -256,9 +317,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(newUser);
           saveUserToCache(newUser);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         // Check for network errors
-        if (err?.message?.includes('Failed to fetch') || err?.name === 'TypeError') {
+        const errMsg = err instanceof Error ? err.message : "";
+        const errName = err instanceof Error ? err.name : "";
+        if (errMsg.includes('Failed to fetch') || errName === 'TypeError') {
           throw new Error("Cannot connect to server. Please check your internet connection or try again later.");
         }
         throw err;
@@ -303,9 +366,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(signedInUser);
         saveUserToCache(signedInUser);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Check for network errors
-      if (err?.message?.includes('Failed to fetch') || err?.name === 'TypeError') {
+      const errMsg = err instanceof Error ? err.message : "";
+      const errName = err instanceof Error ? err.name : "";
+      if (errMsg.includes('Failed to fetch') || errName === 'TypeError') {
         throw new Error("Cannot connect to server. Please check your internet connection and try again.");
       }
       throw err;
@@ -314,16 +379,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // ── Sign out: Clear user state ──────────────────────────────────────────
 
-  const signOut = useCallback(() => {
+  const { error: toastError } = useToast();
+
+  const signOut = useCallback(async () => {
+    // Always clear locally first — the user must not be trapped in a session
+    // because of a network blip. Revocation is awaited so we can surface a
+    // warning without blocking the sign-out itself.
     setUser(null);
     clearUserCache(publicKey);
-    clearWalletSession();
     setVerifiedWallet(null);
     setSessionError(null);
+    setIsSessionExpiring(false);
+    setIsSessionExpired(false);
+    setSessionSecondsRemaining(null);
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(LS_USER);
     }
-  }, [publicKey]);
+
+    const { serverRevoked } = await clearWalletSession();
+    if (!serverRevoked) {
+      reportError("auth.signout_server_revocation_failed", undefined, {
+        fields: { walletAddress: publicKey ?? undefined },
+      });
+      toastError(
+        "Signed out on this device",
+        "The server could not revoke your session — it will expire automatically.",
+      );
+    }
+  }, [publicKey, toastError]);
 
   // ── Refresh session: re-run the wallet signing handshake ──────────────────
 
@@ -335,12 +418,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setSessionNonce((n) => n + 1);
   }, []);
 
+  // ── Sign to continue: re-authenticate session with wallet prompt ──────────
+
+  const signToContinue = useCallback(async () => {
+    if (!publicKey) return;
+    try {
+      setIsSigningToContinue(true);
+      await getAuthenticatedClient(publicKey, { interactive: true, forceRefresh: true });
+      setVerifiedWallet(publicKey);
+      setSessionError(null);
+    } catch (err: unknown) {
+      reportError("auth.reauth_failed", err);
+      const msg = userFacingMessage(err).message;
+      setSessionError(msg);
+      toastError("Session Renewal Failed", msg);
+    } finally {
+      setIsSigningToContinue(false);
+    }
+  }, [publicKey, toastError]);
+
   // ── Update profile ─────────────────────────────────────────────────────────
 
   const updateProfile = useCallback(
     async (updates: Partial<Pick<User, "displayName">>) => {
       if (!publicKey || !user) {
         throw new Error("Not authenticated");
+      }
+
+      if (updates.displayName !== undefined) {
+        if (!updates.displayName.trim()) {
+          throw new Error("Display name is required");
+        }
+        if (updates.displayName.trim().length > 50) {
+          throw new Error("Display name cannot exceed 50 characters");
+        }
       }
 
       try {
@@ -369,11 +480,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(updatedUser);
           saveUserToCache(updatedUser);
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         throw err;
       }
     },
     [publicKey, user]
+  );
+
+  // ── Resolve profile: look up verified display name ────────────────────────
+
+  const resolveUserProfile = useCallback(
+    async (walletAddress: string): Promise<string | null> => {
+      if (!publicKey || !walletAddress || !walletAddress.trim()) return null;
+      try {
+        const client = await requireAuthenticatedClient(publicKey);
+        const { data, error } = await client.rpc("resolve_user_profile", {
+          p_wallet_address: walletAddress.trim(),
+        });
+        if (error || !data || data.length === 0) return null;
+        return data[0].display_name;
+      } catch {
+        return null;
+      }
+    },
+    [publicKey]
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -383,11 +513,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isLoading,
     isAuthenticated,
     sessionError,
+    isSessionExpiring,
+    isSessionExpired,
+    sessionSecondsRemaining,
+    isSigningToContinue,
+    signToContinue,
     signUp,
     signIn,
     signOut,
     refreshSession,
     updateProfile,
+    resolveUserProfile,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

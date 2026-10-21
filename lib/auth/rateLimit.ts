@@ -1,12 +1,12 @@
 /**
- * Fixed-window rate limiter for the unauthenticated auth routes.
+ * Fixed-window rate limiter for the auth routes.
  *
- * Both routes do public-key cryptography on caller-supplied input, so they are
- * worth throttling. `enforceRateLimit` counts against a window shared by every
- * instance (Postgres, via `lib/auth/sharedStore`) so the configured limit is
- * the real limit rather than the limit times the instance count. The in-memory
- * `rateLimit` below is the fallback for deployments with no shared store
- * configured; it applies per process and only blunts casual abuse.
+ * Auth routes do public-key cryptography on caller-supplied input or manage
+ * session revocation, so they are worth throttling. `enforceRateLimit` counts
+ * against a window shared by every instance (Postgres, via `lib/auth/sharedStore`)
+ * so the configured limit is the real limit rather than the limit times the
+ * instance count. The in-memory `rateLimit` below is the fallback for deployments
+ * with no shared store configured; it applies per process and only blunts casual abuse.
  *
  * Neither is a substitute for an edge/WAF rate limit in front of the
  * deployment.
@@ -83,11 +83,35 @@ export async function enforceRateLimit(
 }
 
 /**
- * Best-effort client identity for rate limiting. Proxy headers are spoofable,
- * so this only ever widens the key space — it never grants access.
+ * Client identity for rate limiting.
+ *
+ * Prefers the platform-provided client IP (e.g. `request.ip` on Vercel),
+ * then `x-real-ip` injected by trusted reverse proxies, then the last hop in
+ * `x-forwarded-for` (the address appended by the nearest reverse proxy, which
+ * cannot be spoofed by a client prepending arbitrary IPs). Falls back to "unknown".
+ *
+ * NOTE: Application-level rate limiting is defense-in-depth and not a substitute
+ * for an edge/WAF rate limit (such as Vercel Firewall or Cloudflare WAF) in front
+ * of the deployment.
  */
 export function clientKey(request: Request): string {
+  const directIp = (request as { ip?: string }).ip;
+  if (directIp && directIp.trim()) return directIp.trim();
+
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp && realIp.trim()) return realIp.trim();
+
   const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim();
-  return request.headers.get("x-real-ip") ?? "unknown";
+  if (forwarded) {
+    const hops = forwarded
+      .split(",")
+      .map((h) => h.trim())
+      .filter(Boolean);
+    if (hops.length > 0) {
+      return hops[hops.length - 1];
+    }
+  }
+
+  return "unknown";
 }
+

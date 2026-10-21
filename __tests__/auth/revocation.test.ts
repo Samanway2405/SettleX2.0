@@ -80,6 +80,21 @@ describe("revocation", () => {
     expect(JSON.parse(String(init.body))).toEqual({ p_wallet_address: WALLET });
   });
 
+  it("passes optional p_ttl_seconds when ttlSeconds is provided to revokeWallet", async () => {
+    const fetchMock = jest.fn(async () => jsonResponse(1));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await revokeWallet(WALLET, 50000);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("/rest/v1/rpc/settlex_revoke_wallet");
+    expect(JSON.parse(String(init.body))).toEqual({
+      p_wallet_address: WALLET,
+      p_ttl_seconds: 50000,
+    });
+  });
+
+
   it("raises RevocationUnavailable when the denylist write fails", async () => {
     global.fetch = (async () => jsonResponse({}, 500)) as unknown as typeof fetch;
 

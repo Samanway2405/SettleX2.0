@@ -30,7 +30,7 @@ them in the browser bundle and let anyone mint a token for any wallet):
   `SUPABASE_JWT_SECRET`. The server refuses to boot without it, so a missing
   value fails the deploy rather than the first sign-in. Falls back to the JWT
   secret outside production only.
-- `AUTH_SESSION_TTL_SECONDS` — optional, default 43200 (12h), capped at 86400.
+- `AUTH_SESSION_TTL_SECONDS` — optional, default 3600 (1h), capped at 43200 (12h).
 
 Set the same server-only values in the deployment environment (Vercel → Project
 Settings → Environment Variables, or equivalent), not just in `.env.local`.
@@ -51,11 +51,12 @@ Run contract tests:
 
 Recommended flow:
 
-1. Build contract via Stellar CLI tooling.
-2. Deploy settlement and pool contract instances.
-3. Initialize pool and settlement references.
-4. Execute one `record_payment` flow that triggers pool withdraw to prove inter-contract behavior.
-5. Update `NEXT_PUBLIC_CONTRACT_ID` with settlement contract ID.
+1. Run `./scripts/deploy-contract.sh <secret-key-or-alias> [network]`.
+   Constructors atomically initialize both instances, and the script then
+   submits the admin-authenticated cross-reference update.
+2. Record the printed contract IDs and transaction output.
+3. Execute one `record_payment` flow that triggers pool withdraw to prove inter-contract behavior.
+5. Update `NEXT_PUBLIC_CONTRACT_ID` with the printed settlement contract ID.
 6. Save all explorer links in README/docs.
 
 ## 5. CI/CD Verification

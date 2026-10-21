@@ -4,6 +4,9 @@ import {
   calculateSplit,
   isValidXLMAmount,
   isValidStellarAddress,
+  isValidSplitWeight,
+  MIN_SPLIT_WEIGHT,
+  MAX_SPLIT_WEIGHT,
   xlmToStroops,
   stroopsToXlm,
 } from "@/lib/split/calculator";
@@ -134,6 +137,16 @@ describe("calculateCustomSplit", () => {
     expect(totalNonPayerStroops).toBe(666_666_666n);
   });
 
+  it("allows custom split with maximum weight 1000", () => {
+    const members: Member[] = [
+      { id: "p", name: "Payer", weight: 1 },
+      { id: "a", name: "Alice", weight: 1000 },
+    ];
+    const shares = calculateCustomSplit(1001, members, "p");
+    expect(shares).toHaveLength(1);
+    expect(parseFloat(shares[0].amount)).toBeCloseTo(1000, 5);
+  });
+
   it("throws an error when member weight is zero or negative", () => {
     const members: Member[] = [
       { id: "p", name: "Payer", weight: 1 },
@@ -218,3 +231,27 @@ describe("isValidStellarAddress", () => {
     expect(isValidStellarAddress("")).toBe(false);
   });
 });
+
+// ─── isValidSplitWeight ───────────────────────────────────────────────────────
+
+describe("isValidSplitWeight", () => {
+  it("accepts valid integer weights between MIN_SPLIT_WEIGHT and MAX_SPLIT_WEIGHT (1 to 1000)", () => {
+    expect(MIN_SPLIT_WEIGHT).toBe(1);
+    expect(MAX_SPLIT_WEIGHT).toBe(1000);
+    expect(isValidSplitWeight(1)).toBe(true);
+    expect(isValidSplitWeight(500)).toBe(true);
+    expect(isValidSplitWeight(999)).toBe(true);
+    expect(isValidSplitWeight(1000)).toBe(true);
+  });
+
+  it("rejects non-integer weights or weights outside bounds", () => {
+    expect(isValidSplitWeight(0)).toBe(false);
+    expect(isValidSplitWeight(-1)).toBe(false);
+    expect(isValidSplitWeight(1001)).toBe(false);
+    expect(isValidSplitWeight(1.5)).toBe(false);
+    expect(isValidSplitWeight(undefined)).toBe(false);
+    expect(isValidSplitWeight(NaN)).toBe(false);
+    expect(isValidSplitWeight(Infinity)).toBe(false);
+  });
+});
+

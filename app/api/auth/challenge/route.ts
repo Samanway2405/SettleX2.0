@@ -56,6 +56,20 @@ export async function POST(request: Request) {
     );
   }
 
+  const walletLimit = await enforceRateLimit(`challenge:wallet:${walletAddress}`, 15, 60_000);
+  if (!walletLimit.allowed) {
+    logger.warn("auth.challenge_wallet_rate_limited", {
+      walletAddress,
+      retryAfter: walletLimit.retryAfter,
+    });
+    logger.finish("auth.challenge_completed", 429);
+    return jsonWithCorrelation(
+      logger,
+      { error: "Too many authentication attempts for this wallet. Please wait a moment." },
+      { status: 429, headers: { ...NO_STORE, "Retry-After": String(walletLimit.retryAfter) } },
+    );
+  }
+
   try {
     const challenge = createChallenge(walletAddress, getChallengeSecret());
     // The address is truncated by the redaction layer before it is emitted.

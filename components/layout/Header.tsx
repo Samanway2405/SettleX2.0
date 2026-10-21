@@ -24,8 +24,8 @@ export default function Header() {
   const { isConnected, publicKey, disconnect } = useWallet();
   const { user, isAuthenticated, signOut } = useAuth();
 
-  const handleSignOut = () => {
-    signOut();
+  const handleSignOut = async () => {
+    await signOut();
     disconnect();
     setUserMenuOpen(false);
     setMobileOpen(false);

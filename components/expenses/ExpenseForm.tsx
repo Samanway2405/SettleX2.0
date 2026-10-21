@@ -1,26 +1,26 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Plus, Trash2, Zap, Users, ChevronDown } from "lucide-react";
 import { Input, Textarea } from "@/components/ui/Input";
 import { SplitCalculator } from "./SplitCalculator";
-import { calculateSplit, isValidXLMAmount, isValidStellarAddress, stroopsToXlm, xlmToStroops } from "@/lib/split/calculator";
+import {
+  calculateSplit,
+  isValidXLMAmount,
+  isValidStellarAddress,
+  isValidSplitWeight,
+  MIN_SPLIT_WEIGHT,
+  MAX_SPLIT_WEIGHT,
+  stroopsToXlm,
+  xlmToStroops,
+} from "@/lib/split/calculator";
 import { useExpense } from "@/hooks/useExpense";
 import { useToast } from "@/components/ui/Toast";
+import { AuthContext } from "@/context/AuthContext";
 import type { Expense, ExpenseFormData, Member, SplitMode } from "@/types/expense";
 
-const MIN_SPLIT_WEIGHT = 1;
-const MAX_SPLIT_WEIGHT = 1000;
-
-function isValidSplitWeight(weight: number | undefined): weight is number {
-  return (
-    typeof weight === "number" &&
-    Number.isInteger(weight) &&
-    weight >= MIN_SPLIT_WEIGHT &&
-    weight <= MAX_SPLIT_WEIGHT
-  );
-}
+const MAX_MEMBERS = 50;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -77,6 +77,11 @@ export function ExpenseForm({
   // ── Field-level errors ──────────────────────────────────────────────────────
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // ── User profile resolution ─────────────────────────────────────────────────
+  const authContext = useContext(AuthContext);
+  const resolveUserProfile = authContext?.resolveUserProfile;
+  const [resolvedProfiles, setResolvedProfiles] = useState<Record<string, string>>({});
+
   // ── Live split preview ──────────────────────────────────────────────────────
   // Preview shows as soon as: valid amount + at least 2 members have names.
   // Wallet addresses are NOT required for the preview — they are only
@@ -105,7 +110,10 @@ export function ExpenseForm({
   }, [members, paidByMemberId]);
 
   // ── Member helpers ──────────────────────────────────────────────────────────
-  const addMember = () => setMembers((prev) => [...prev, blankMember()]);
+  const addMember = () => {
+    if (members.length >= MAX_MEMBERS) return;
+    setMembers((prev) => [...prev, blankMember()]);
+  };
 
   const removeMember = (id: string) => {
     if (members.length <= 2) return; // minimum 2 members
@@ -118,17 +126,55 @@ export function ExpenseForm({
     );
   };
 
+  const handleMemberAddressChange = useCallback(
+    async (id: string, address: string) => {
+      updateMember(id, { walletAddress: address });
+      const trimmed = address.trim();
+      if (!resolveUserProfile || !isValidStellarAddress(trimmed)) return;
+      try {
+        const verifiedName = await resolveUserProfile(trimmed);
+        if (verifiedName) {
+          setResolvedProfiles((prev) => ({ ...prev, [trimmed]: verifiedName }));
+          setMembers((prev) =>
+            prev.map((m) =>
+              m.id === id && (!m.name.trim() || m.name.startsWith("Member") || m.name.startsWith("Person"))
+                ? { ...m, name: verifiedName }
+                : m
+            )
+          );
+        }
+      } catch {
+        // ignore profile lookup failure
+      }
+    },
+    [resolveUserProfile]
+  );
+
   // ── Validation ──────────────────────────────────────────────────────────────
   function validate(): boolean {
     const errs: Record<string, string> = {};
 
-    if (!title.trim()) errs.title = "Title is required.";
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) {
+      errs.title = "Title is required.";
+    } else if (trimmedTitle.length > 120) {
+      errs.title = "Title cannot exceed 120 characters.";
+    }
+
+    if (description.trim().length > 100) {
+      errs.description = "Description cannot exceed 100 characters.";
+    }
+
     if (!totalAmount || !isValidXLMAmount(totalAmount))
       errs.totalAmount = "Enter a valid XLM amount (e.g. 10.5).";
 
     members.forEach((m, i) => {
-      if (!m.name.trim())
+      const trimmedName = m.name.trim();
+      if (!trimmedName) {
         errs[`member_name_${i}`] = "Name is required.";
+      } else if (trimmedName.length > 50) {
+        errs[`member_name_${i}`] = "Name cannot exceed 50 characters.";
+      }
       if (!m.walletAddress?.trim())
         errs[`member_addr_${i}`] = "Stellar address is required to enable payments.";
       else if (!isValidStellarAddress(m.walletAddress.trim()))
@@ -143,7 +189,11 @@ export function ExpenseForm({
     });
 
     const filledNames = members.filter((m) => m.name.trim());
-    if (filledNames.length < 2) errs.members = "Add at least 2 members.";
+    if (filledNames.length < 2) {
+      errs.members = "Add at least 2 members.";
+    } else if (members.length > MAX_MEMBERS) {
+      errs.members = "Maximum 50 members allowed.";
+    }
 
     const weightsAreValid = members.every((m) => isValidSplitWeight(m.weight));
 
@@ -238,6 +288,7 @@ export function ExpenseForm({
         required
         placeholder="Dinner at Ramen Soul"
         value={title}
+        maxLength={120}
         onChange={(e) => setTitle(e.target.value)}
         error={errors.title}
       />
@@ -258,6 +309,7 @@ export function ExpenseForm({
           placeholder="Add a short note about this expense…"
           value={description}
           maxLength={100}
+          error={errors.description}
           onChange={(e) => setDescription(e.target.value)}
         />
       </div>
@@ -313,7 +365,12 @@ export function ExpenseForm({
           <button
             type="button"
             onClick={addMember}
-            className="flex items-center gap-1 text-xs font-semibold text-[#555] hover:text-[#0F0F14] transition-colors"
+            disabled={members.length >= MAX_MEMBERS}
+            className={`flex items-center gap-1 text-xs font-semibold transition-colors ${
+              members.length >= MAX_MEMBERS
+                ? "text-[#CCC] cursor-not-allowed"
+                : "text-[#555] hover:text-[#0F0F14]"
+            }`}
           >
             <Plus size={13} />
             Add
@@ -341,16 +398,24 @@ export function ExpenseForm({
 
                   <div className="flex-1 grid grid-cols-1 gap-2">
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <input
-                        placeholder="Name *"
-                        value={member.name}
-                        onChange={(e) => updateMember(member.id, { name: e.target.value })}
-                        className={`w-full rounded-lg border px-3 py-2 text-sm bg-white outline-none transition-all
-                          ${errors[`member_name_${i}`]
-                            ? "border-red-300 focus:border-red-400"
-                            : "border-[#E5E5E5] focus:border-[#B9FF66] focus:ring-2 focus:ring-[#B9FF66]/20"
-                          }`}
-                      />
+                      <div>
+                        <input
+                          placeholder="Name *"
+                          value={member.name}
+                          maxLength={50}
+                          onChange={(e) => updateMember(member.id, { name: e.target.value })}
+                          className={`w-full rounded-lg border px-3 py-2 text-sm bg-white outline-none transition-all
+                            ${errors[`member_name_${i}`]
+                              ? "border-red-300 focus:border-red-400"
+                              : "border-[#E5E5E5] focus:border-[#B9FF66] focus:ring-2 focus:ring-[#B9FF66]/20"
+                            }`}
+                        />
+                        {errors[`member_name_${i}`] && (
+                          <p className="text-xs text-red-500 mt-1">
+                            {errors[`member_name_${i}`]}
+                          </p>
+                        )}
+                      </div>
 
                       {splitMode === "custom" && (
                         <div>
@@ -391,13 +456,39 @@ export function ExpenseForm({
                     <input
                       placeholder="Stellar address G… (required to pay)"
                       value={member.walletAddress ?? ""}
-                      onChange={(e) => updateMember(member.id, { walletAddress: e.target.value })}
+                      onChange={(e) => handleMemberAddressChange(member.id, e.target.value)}
                       className={`w-full rounded-lg border px-3 py-2 text-sm bg-white outline-none transition-all font-mono
                         ${errors[`member_addr_${i}`]
                           ? "border-red-300 focus:border-red-400"
                           : "border-[#E5E5E5] focus:border-[#B9FF66] focus:ring-2 focus:ring-[#B9FF66]/20"
                         }`}
                     />
+                    {/* Verified user profile resolution indicator */}
+                    {(() => {
+                      const addr = member.walletAddress?.trim();
+                      if (!addr || !isValidStellarAddress(addr)) return null;
+                      const verifiedName = resolvedProfiles[addr];
+                      if (!verifiedName) return null;
+                      if (member.name === verifiedName) {
+                        return (
+                          <p className="text-[11px] text-emerald-600 font-medium">
+                            ✓ Verified profile: {verifiedName}
+                          </p>
+                        );
+                      }
+                      return (
+                        <div className="flex items-center gap-1.5 text-[11px] text-[#555]">
+                          <span>Verified profile: <strong>{verifiedName}</strong></span>
+                          <button
+                            type="button"
+                            onClick={() => updateMember(member.id, { name: verifiedName })}
+                            className="text-xs text-blue-600 underline hover:text-blue-800"
+                          >
+                            Use verified name
+                          </button>
+                        </div>
+                      );
+                    })()}
                     {/* Inline duplicate check — shown while user types, before submit */}
                     {(() => {
                       const addr = member.walletAddress?.trim();

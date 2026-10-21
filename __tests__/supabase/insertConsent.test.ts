@@ -44,4 +44,13 @@ describe("expense and trip insert consent boundary (Issue #127)", () => {
     );
     expect(setupSql).toMatch(/Accept the expense invitation before recording a payment/i);
   });
+
+  it("validates custom split weights from 1 to 1000 (Issue #195)", () => {
+    expect(setupSql).toMatch(
+      /COALESCE\(m->>'weight',\s*''\)\s*!~\s*'\^\[1-9\]\[0-9\]\{0,3\}\$'/
+    );
+    expect(setupSql).toMatch(/\(m->>'weight'\)::INTEGER\s*>\s*1000/);
+    expect(setupSql).toMatch(/Custom split weights must be integers from 1 to 1000/i);
+  });
 });
+

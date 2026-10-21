@@ -5,6 +5,7 @@ import { Users, Calculator } from "lucide-react";
 import { formatXLM } from "@/lib/utils";
 import { xlmToStroops, stroopsToXlm } from "@/lib/split/calculator";
 import { PaymentRow } from "./PaymentRow";
+import type { SplitShare } from "@/types/expense";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

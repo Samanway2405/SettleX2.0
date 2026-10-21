@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short,
-    Address, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
+    BytesN, Env,
 };
 
 #[contracterror]
@@ -63,13 +63,17 @@ pub struct SettlementPoolContract;
 
 #[contractimpl]
 impl SettlementPoolContract {
-    pub fn init_pool(env: Env, admin: Address, settlement_contract: Address) {
+    pub fn __constructor(env: Env, admin: Address, settlement_contract: Address) {
+        Self::initialize(&env, admin, settlement_contract);
+    }
+
+    fn initialize(env: &Env, admin: Address, settlement_contract: Address) {
         if env.storage().instance().has(&PoolDataKey::Config) {
-            panic_with_error!(&env, PoolError::AlreadyInitialized);
+            panic_with_error!(env, PoolError::AlreadyInitialized);
         }
 
         if admin == settlement_contract {
-            panic_with_error!(&env, PoolError::InvalidActor);
+            panic_with_error!(env, PoolError::InvalidActor);
         }
 
         admin.require_auth();
@@ -79,9 +83,25 @@ impl SettlementPoolContract {
             settlement_contract: settlement_contract.clone(),
         };
 
-        env.storage().instance().set(&PoolDataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .set(&PoolDataKey::Version, &CONTRACT_VERSION);
         env.storage().instance().set(&PoolDataKey::Config, &cfg);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+    }
+
+    pub fn init_pool(env: Env, admin: Address, settlement_contract: Address) {
+        if env.storage().instance().has(&PoolDataKey::Config) {
+            panic_with_error!(&env, PoolError::AlreadyInitialized);
+        }
+
+        if admin == settlement_contract {
+            panic_with_error!(&env, PoolError::InvalidActor);
+        }
+
+        Self::initialize(&env, admin.clone(), settlement_contract.clone());
 
         env.events().publish(
             (symbol_short!("pool_ini"),),
@@ -113,12 +133,21 @@ impl SettlementPoolContract {
         }
 
         let admin = Self::require_admin_at_supported_version(&env);
-        env.storage().instance().set(&PoolDataKey::Version, &CONTRACT_VERSION);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&PoolDataKey::Version, &CONTRACT_VERSION);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("migrate"),),
-            (old_version, CONTRACT_VERSION, admin, env.ledger().timestamp()),
+            (
+                old_version,
+                CONTRACT_VERSION,
+                admin,
+                env.ledger().timestamp(),
+            ),
         );
     }
 
@@ -152,12 +181,15 @@ impl SettlementPoolContract {
     pub fn get_config(env: Env) -> PoolConfig {
         Self::require_current_version(&env);
 
-        let cfg = env.storage()
+        let cfg = env
+            .storage()
             .instance()
             .get(&PoolDataKey::Config)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
 
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
         cfg
     }
 
@@ -171,7 +203,9 @@ impl SettlementPoolContract {
 
         cfg.settlement_contract = new_contract;
         env.storage().instance().set(&PoolDataKey::Config, &cfg);
-        env.storage().instance().extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
 
         env.events().publish(
             (symbol_short!("pool_cfg"),),
@@ -192,9 +226,9 @@ impl SettlementPoolContract {
             panic_with_error!(&env, PoolError::AmountTooLarge);
         }
 
-        // Pool credits are admin-managed to avoid untrusted self-minting.
-        let cfg = Self::get_config(env.clone());
-        cfg.admin.require_auth();
+        // Self-service deposit: member authorizes the deposit of credits.
+        let _cfg = Self::get_config(env.clone());
+        member.require_auth();
 
         let key = PoolDataKey::Balance(member.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0_i128);
@@ -270,14 +304,15 @@ impl SettlementPoolContract {
         let _cfg = Self::get_config(env.clone());
 
         let key = PoolDataKey::Balance(member);
-        let balance = env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(0_i128);
+        let balance = env.storage().persistent().get(&key).unwrap_or(0_i128);
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(
+                &key,
+                STORAGE_BUMP_THRESHOLD,
+                STORAGE_BUMP_AMOUNT,
+            );
+        }
 
         balance
     }
@@ -300,6 +335,15 @@ mod test {
             let $admin = Address::generate(&$env);
             let $settlement = Address::generate(&$env);
         };
+    }
+
+    #[test]
+    fn test_balance_of_missing_member_is_zero() {
+        setup_pool!(env, client, admin, settlement_contract);
+        client.init_pool(&admin, &settlement_contract);
+
+        let member = Address::generate(&env);
+        assert_eq!(client.balance_of(&member), 0_i128);
     }
 
     // ── Withdraw authorization ────────────────────────────────────────────

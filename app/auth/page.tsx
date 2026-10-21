@@ -25,9 +25,16 @@ export default function AuthPage() {
     setError("");
 
     // Validate name for sign up
-    if (isSignUpMode && !displayName.trim()) {
-      setError("Please enter your name");
-      return;
+    if (isSignUpMode) {
+      const trimmed = displayName.trim();
+      if (!trimmed) {
+        setError("Please enter your name");
+        return;
+      }
+      if (trimmed.length > 50) {
+        setError("Name cannot exceed 50 characters");
+        return;
+      }
     }
 
     setIsSubmitting(true);
@@ -206,6 +213,7 @@ export default function AuthPage() {
                   type="text"
                   placeholder="Enter your full name"
                   value={displayName}
+                  maxLength={50}
                   onChange={(e) => {
                     setDisplayName(e.target.value);
                     setError("");

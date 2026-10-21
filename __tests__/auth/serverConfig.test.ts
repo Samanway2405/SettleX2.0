@@ -1,3 +1,5 @@
+import * as fs from "fs";
+import * as path from "path";
 import { DEFAULT_SESSION_TTL_SECONDS } from "@/lib/auth/constants";
 import {
   assertAuthConfig,
@@ -5,6 +7,7 @@ import {
   getChallengeSecret,
   getJwtSecret,
   getSessionTtlSeconds,
+  MAX_SESSION_TTL_CAP_SECONDS,
 } from "@/lib/auth/serverConfig";
 
 const ORIGINAL = { ...process.env };
@@ -122,3 +125,21 @@ describe("getSessionTtlSeconds", () => {
     expect(DEFAULT_SESSION_TTL_SECONDS).toBeLessThanOrEqual(60 * 60);
   });
 });
+
+describe("revocation tombstone vs session TTL cap (Issue #196)", () => {
+  it("asserts database revocation tombstone TTL strictly exceeds maximum session TTL cap", () => {
+    const setupSqlPath = path.resolve(__dirname, "../../supabase-setup.sql");
+    const sqlContent = fs.readFileSync(setupSqlPath, "utf8");
+
+    // Extract default tombstone TTL interval from settlex_revoke_wallet
+    const match = sqlContent.match(/v_max_ttl\s+INTERVAL\s*:=\s*INTERVAL\s*'(\d+)\s+hours'/i);
+    expect(match).not.toBeNull();
+
+    const tombstoneHours = parseInt(match![1], 10);
+    const tombstoneSeconds = tombstoneHours * 60 * 60;
+
+    // Cap from MAX_SESSION_TTL_CAP_SECONDS (12h)
+    expect(tombstoneSeconds).toBeGreaterThan(MAX_SESSION_TTL_CAP_SECONDS);
+  });
+});
+

@@ -82,11 +82,66 @@ function decodeTokenClaims(accessToken: string): TokenClaims | null {
 /**
  * Freshness measured against the token's own `exp`, so editing the stored
  * `expiresAt` cannot make a dead token look alive.
+ *
+ * A token is considered fresh until its actual expiry time (`claims.expiresAt`).
+ * Previously this subtracted `SESSION_REFRESH_SKEW_SECONDS`, which prematurely
+ * dropped valid sessions 5 minutes early.
  */
-function isFresh(session: WalletSession, now = Date.now()): boolean {
+export function isFresh(session: WalletSession, now = Date.now()): boolean {
   const claims = decodeTokenClaims(session.accessToken);
   if (!claims) return false;
-  return claims.expiresAt - SESSION_REFRESH_SKEW_SECONDS * 1000 > now;
+  return claims.expiresAt > now;
+}
+
+/**
+ * Returns true if the session is alive but inside the warning window before
+ * expiry (`SESSION_REFRESH_SKEW_SECONDS`), so the UI can prompt the user to re-sign.
+ */
+export function isSessionExpiringSoon(session: WalletSession, now = Date.now()): boolean {
+  const claims = decodeTokenClaims(session.accessToken);
+  if (!claims) return false;
+  return claims.expiresAt > now && claims.expiresAt - SESSION_REFRESH_SKEW_SECONDS * 1000 <= now;
+}
+
+/**
+ * Returns true if the token is past its expiration time.
+ */
+export function isSessionExpired(session: WalletSession, now = Date.now()): boolean {
+  const claims = decodeTokenClaims(session.accessToken);
+  if (!claims) return true;
+  return claims.expiresAt <= now;
+}
+
+export interface SessionExpiryInfo {
+  expiresAt: number;
+  secondsRemaining: number;
+  isExpiringSoon: boolean;
+  isExpired: boolean;
+}
+
+/**
+ * Returns expiry information for the active or stored session for `walletAddress`.
+ */
+export function getSessionExpiryInfo(
+  walletAddress: string,
+  now = Date.now(),
+): SessionExpiryInfo | null {
+  if (typeof window === "undefined" || !walletAddress) return null;
+  const session = memoizedSession ?? readAnyStoredSession();
+  if (!session?.accessToken) return null;
+  const claims = decodeTokenClaims(session.accessToken);
+  if (!claims || claims.walletAddress !== walletAddress) return null;
+
+  const secondsRemaining = Math.max(0, Math.floor((claims.expiresAt - now) / 1000));
+  const expired = claims.expiresAt <= now;
+  const expiringSoon = !expired && claims.expiresAt - SESSION_REFRESH_SKEW_SECONDS * 1000 <= now;
+
+  return {
+    expiresAt: claims.expiresAt,
+    secondsRemaining,
+    isExpiringSoon: expiringSoon,
+    isExpired: expired,
+  };
 }
 
 /**
@@ -151,15 +206,19 @@ function storeSession(session: WalletSession): void {
  * Tells the server to revoke the current token, so it stops working everywhere
  * rather than only in this browser.
  *
- * Fire-and-forget by design: the local session is cleared either way, because a
- * user who clicked "sign out" must never be left holding a live session just
- * because the network failed. The token stays denied server-side once the call
- * lands; if it never lands, the short TTL is the backstop.
+ * The local session is cleared by the caller regardless of the outcome, because
+ * a user who clicked "sign out" must never be left holding a live session just
+ * because the network failed. The resolved boolean lets the caller surface a
+ * warning toast when the server explicitly refused — "clear locally, tell the
+ * user" are not mutually exclusive.
  */
-function revokeOnServer(session: WalletSession, everywhere: boolean): void {
+async function revokeOnServer(
+  session: WalletSession,
+  everywhere: boolean,
+): Promise<{ ok: boolean }> {
   try {
     const body = JSON.stringify({ everywhere });
-    void fetch(SIGNOUT_ENDPOINT, {
+    const response = await fetch(SIGNOUT_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -167,11 +226,11 @@ function revokeOnServer(session: WalletSession, everywhere: boolean): void {
       },
       body,
       keepalive: true,
-    }).catch(() => {
-      // Already logged out locally; nothing useful to show the user here.
     });
+    return { ok: response.ok };
   } catch {
-    // ignore
+    // Network failure: the short TTL is the backstop. Treat as non-fatal.
+    return { ok: false };
   }
 }
 
@@ -180,14 +239,23 @@ function revokeOnServer(session: WalletSession, everywhere: boolean): void {
  * call re-runs the handshake and the old token is dead rather than merely
  * forgotten.
  *
+ * Always clears locally — the user must never be left holding a live session
+ * because of a network error. Returns `{ serverRevoked: true }` when the server
+ * confirmed the revocation, `false` otherwise, so callers can surface a warning
+ * without blocking sign-out.
+ *
  * Pass `everywhere` to also deny every other token issued to this wallet.
  */
-export function clearWalletSession(options: { everywhere?: boolean } = {}): void {
+export async function clearWalletSession(
+  options: { everywhere?: boolean } = {},
+): Promise<{ serverRevoked: boolean }> {
   // After a reload the in-memory copy is gone but localStorage still holds a
   // live token — read it back, or sign-out would revoke nothing in exactly the
   // case that matters most.
   const revoking = memoizedSession ?? readAnyStoredSession();
-  if (revoking) revokeOnServer(revoking, options.everywhere === true);
+  const revocationResult = revoking
+    ? await revokeOnServer(revoking, options.everywhere === true)
+    : { ok: true };
 
   sessionEpoch += 1;
   memoizedSession = null;
@@ -204,6 +272,7 @@ export function clearWalletSession(options: { everywhere?: boolean } = {}): void
     }
   }
   notifySessionChange();
+  return { serverRevoked: revocationResult.ok };
 }
 
 let memoizedSession: WalletSession | null = null;
@@ -366,12 +435,18 @@ async function runHandshake(walletAddress: string): Promise<WalletSession> {
   // real, but nobody is waiting for it any more -- caching it would resurrect a
   // session the user just ended. Revoke it and report the handshake as void.
   if (epoch !== sessionEpoch) {
-    revokeOnServer(session, false);
+    void revokeOnServer(session, false);
     throw new WalletSessionError("Sign-in was cancelled.");
   }
 
   memoizedSession = session;
   storeSession(session);
+  // Re-bind realtime on the active client so open subscriptions receive the
+  // new token immediately without dropping events.
+  if (memoizedClient) {
+    memoizedClient.token = session.accessToken;
+    memoizedClient.client.realtime.setAuth(session.accessToken);
+  }
   notifySessionChange();
   return session;
 }
@@ -382,6 +457,21 @@ export interface SessionOptions {
    * background reads so the app never pops a wallet dialog unprompted.
    */
   interactive?: boolean;
+  /**
+   * If true, bypass cached tokens and force a re-authentication handshake.
+   */
+  forceRefresh?: boolean;
+}
+
+/**
+ * Rebinds the realtime client to a new access token so active subscriptions
+ * continue delivering changes without disruption.
+ */
+export function rebindRealtimeAuth(accessToken: string): void {
+  if (memoizedClient) {
+    memoizedClient.token = accessToken;
+    memoizedClient.client.realtime.setAuth(accessToken);
+  }
 }
 
 /**
@@ -395,19 +485,21 @@ export async function getWalletSession(
 ): Promise<WalletSession | null> {
   if (!walletAddress) throw new WalletSessionError("Wallet not connected.");
 
-  // The memoized copy is rebuilt from claims when it is stored, but re-check
-  // ownership against the token so this path cannot drift from the stored one.
-  const memoized =
-    memoizedSession &&
-    decodeTokenClaims(memoizedSession.accessToken)?.walletAddress === walletAddress &&
-    isFresh(memoizedSession)
-      ? memoizedSession
-      : null;
-  const cached = memoized ?? readStoredSession(walletAddress);
+  if (!options.forceRefresh) {
+    // The memoized copy is rebuilt from claims when it is stored, but re-check
+    // ownership against the token so this path cannot drift from the stored one.
+    const memoized =
+      memoizedSession &&
+      decodeTokenClaims(memoizedSession.accessToken)?.walletAddress === walletAddress &&
+      isFresh(memoizedSession)
+        ? memoizedSession
+        : null;
+    const cached = memoized ?? readStoredSession(walletAddress);
 
-  if (cached) {
-    memoizedSession = cached;
-    return cached;
+    if (cached) {
+      memoizedSession = cached;
+      return cached;
+    }
   }
 
   if (options.interactive === false) return null;
@@ -437,16 +529,17 @@ export async function getWalletSession(
 
 // ─── Authenticated client ─────────────────────────────────────────────────────
 
-let memoizedClient: { token: string; client: SupabaseClient } | null = null;
+let memoizedClient: { token: string; client: SupabaseClient<Database> } | null = null;
 
-function buildClient(accessToken: string): SupabaseClient {
+function buildClient(accessToken: string): SupabaseClient<Database> {
   if (memoizedClient?.token === accessToken) return memoizedClient.client;
 
   if (memoizedClient) {
+    memoizedClient.client.realtime.setAuth(accessToken);
     void memoizedClient.client.removeAllChannels();
   }
 
-  const client = createClient(supabaseUrl, supabaseAnonKey, {
+  const client = createClient<Database>(supabaseUrl, supabaseAnonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
     realtime: { params: { eventsPerSecond: 10 } },
     global: { headers: { Authorization: `Bearer ${accessToken}` } },
@@ -467,7 +560,7 @@ function buildClient(accessToken: string): SupabaseClient {
 export async function getAuthenticatedClient(
   walletAddress: string,
   options: SessionOptions = {},
-): Promise<SupabaseClient | null> {
+): Promise<SupabaseClient<Database> | null> {
   const session = await getWalletSession(walletAddress, options);
   if (!session) return null;
   return buildClient(session.accessToken);
@@ -479,15 +572,8 @@ export async function getAuthenticatedClient(
  */
 export async function requireAuthenticatedClient(
   walletAddress: string,
-): Promise<SupabaseClient> {
+): Promise<SupabaseClient<Database>> {
   const client = await getAuthenticatedClient(walletAddress, { interactive: true });
   if (!client) throw new WalletSessionError("Wallet sign-in is required.");
   return client;
-}
-
-export function getTypedClient() {
-  return createClient<Database>(supabaseUrl, supabaseAnonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    realtime: { params: { eventsPerSecond: 10 } },
-  });
 }

@@ -4,8 +4,12 @@ import React from "react";
 import { CheckCircle2, ExternalLink, Layers } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { TransactionHash } from "@/components/payment/TransactionHash";
-import { STELLAR_EXPLORER, STELLAR_NETWORK } from "@/lib/utils/constants";
-import { cn, formatXLM } from "@/lib/utils";
+import {
+  STELLAR_EXPLORER,
+  STELLAR_NETWORK,
+  stellarNetworkLabel,
+} from "@/lib/utils/constants";
+import { cn, formatAddress, formatXLM } from "@/lib/utils";
 
 export interface ReceiptModalProps {
   open: boolean;
@@ -16,6 +20,9 @@ export interface ReceiptModalProps {
   amount: string;
   recipientName: string;
   ledger?: number;
+  paidBy?: string;
+  markedAt?: string;
+  manual?: boolean;
 }
 
 export function ReceiptModal({
@@ -26,10 +33,13 @@ export function ReceiptModal({
   amount,
   recipientName,
   ledger,
+  paidBy,
+  markedAt,
+  manual,
 }: ReceiptModalProps) {
   const explorerUrl = `${STELLAR_EXPLORER}/tx/${txHash}`;
   const displayAmount = formatXLM(amount);
-  const networkName = STELLAR_NETWORK === "PUBLIC" ? "Mainnet" : "Testnet";
+  const networkName = stellarNetworkLabel(STELLAR_NETWORK);
 
   return (
     <Modal
@@ -71,6 +81,44 @@ export function ReceiptModal({
         />
         {ledger !== undefined && (
           <ReceiptRow label="Ledger" value={`#${ledger}`} />
+        )}
+        {paidBy && (
+          <ReceiptRow
+            label="Marked Paid By"
+            value={
+              <a
+                href={`${STELLAR_EXPLORER}/account/${paidBy}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-mono text-xs text-[#0F0F14] hover:underline inline-flex items-center gap-1"
+                title={paidBy}
+              >
+                {formatAddress(paidBy, 6)}
+                <ExternalLink size={10} className="opacity-60" />
+              </a>
+            }
+          />
+        )}
+        {markedAt && (
+          <ReceiptRow
+            label="Marked At"
+            value={
+              <span className="text-xs text-[#555]">
+                {new Date(markedAt).toLocaleString()}
+              </span>
+            }
+          />
+        )}
+        {manual && (
+          <ReceiptRow
+            label="Payment Type"
+            value={
+              <span className="text-xs font-semibold text-[#D97706] bg-[#FEF3C7] border border-[#FDE68A] px-2 py-0.5 rounded">
+                Manual creator override
+              </span>
+            }
+            hint="Recorded directly by expense creator rather than detected from recipient wallet"
+          />
         )}
       </dl>
 

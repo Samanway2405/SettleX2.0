@@ -25,6 +25,7 @@ describe("parsePaymentEvent", () => {
       member: "GAAAA",
       amountStroops: "2500000",
       txHash: "abc123",
+      attested: false,
     });
   });
 

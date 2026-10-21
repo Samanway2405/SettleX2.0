@@ -47,30 +47,59 @@ jobs:
         run: |
           node -e "
             const fs = require('fs');
-            const sql = fs.readFileSync('supabase-setup.sql', 'utf8');
-            const funcs = sql.split(/CREATE OR REPLACE FUNCTION/i).slice(1);
+            const path = require('path');
+            const files = ['supabase-setup.sql'];
+            const migDir = 'supabase/migrations';
+            if (fs.existsSync(migDir)) {
+              for (const f of fs.readdirSync(migDir)) {
+                if (f.endsWith('.sql')) files.push(path.join(migDir, f));
+              }
+            }
             let errors = 0;
-            for (const chunk of funcs) {
-              const header = chunk.split(/\$\$|\$body\$/i)[0];
-              const nameMatch = header.match(/^\s*([a-zA-Z0-9_\.]+)/);
-              const funcName = nameMatch ? nameMatch[1] : 'unknown';
-              if (!/search_path\s*=/i.test(header)) {
-                console.error('ERROR: Function ' + funcName + ' is missing SET search_path');
-                errors++;
+            for (const file of files) {
+              const sql = fs.readFileSync(file, 'utf8');
+              const funcs = sql.split(/CREATE OR REPLACE FUNCTION/i).slice(1);
+              for (const chunk of funcs) {
+                const header = chunk.split(/\$\$|\$body\$/i)[0];
+                const nameMatch = header.match(/^\s*([a-zA-Z0-9_\.]+)/);
+                const funcName = nameMatch ? nameMatch[1] : 'unknown';
+                if (!/search_path\s*=/i.test(header)) {
+                  console.error('ERROR in ' + file + ': Function ' + funcName + ' is missing SET search_path');
+                  errors++;
+                }
               }
             }
             if (errors > 0) {
               console.error('Failed Supabase DB function search_path lint with ' + errors + ' errors.');
               process.exit(1);
             }
-            console.log('Passed Supabase DB function search_path lint.');
+            console.log('Passed Supabase DB function search_path lint across ' + files.length + ' files.');
           "
 
       - name: Validate Supabase SQL Syntax
         run: |
-          docker run --name pg-lint -e POSTGRES_PASSWORD=postgres -d postgres
-          sleep 5
+          docker run --name pg-lint -e POSTGRES_PASSWORD=postgres -d postgres:16 -c wal_level=logical
+          trap 'docker rm -f pg-lint >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 60); do
+            if docker exec pg-lint pg_isready -U postgres; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "PostgreSQL did not become ready within 60 seconds."
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec -i pg-lint psql -U postgres -c "CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role; CREATE PUBLICATION supabase_realtime;"
+          echo "Validating supabase-setup.sql..."
           docker exec -i pg-lint psql -U postgres -v ON_ERROR_STOP=1 -f - < supabase-setup.sql
+          echo "Validating versioned migrations on clean database..."
+          docker exec -i pg-lint psql -U postgres -c "CREATE DATABASE settlex_migrations; GRANT ALL ON DATABASE settlex_migrations TO postgres;"
+          docker exec -i pg-lint psql -U postgres -d settlex_migrations -c "CREATE PUBLICATION supabase_realtime;"
+          for mig in $(ls supabase/migrations/*.sql | sort); do
+            echo "Applying $mig"
+            docker exec -i pg-lint psql -U postgres -d settlex_migrations -v ON_ERROR_STOP=1 -f - < "$mig"
+          done
 
       - name: Test with coverage gate
         run: npm run test:coverage -- --runInBand
@@ -90,10 +119,10 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Install Stellar CLI
-        run: curl -fsSL https://github.com/stellar/stellar-cli/raw/main/install.sh | sh
+        run: cargo install --locked stellar-cli --version 26.1.0
 
       - name: Run contract tests
         working-directory: contract
@@ -101,20 +130,25 @@ jobs:
 
       - name: Build contract for WASM
         run: |
-          rustup target add wasm32v1-none
-          stellar contract build --manifest-path contract/Cargo.toml
+          stellar contract build --manifest-path contract/Cargo.toml --package settlex-contract
+          stellar contract build --manifest-path contract/Cargo.toml --package settlement-pool-contract
 
       - name: Check WASM size
         run: |
-          WASM_FILE=$(find target -name "*.wasm" | head -n 1)
-          if [ -z "$WASM_FILE" ]; then
-            echo "Error: WASM file not found!"
-            exit 1
-          fi
-          SIZE=$(stat -c%s "$WASM_FILE")
-          MAX_SIZE=131072
-          echo "WASM size: $SIZE bytes"
-          if [ "$SIZE" -gt "$MAX_SIZE" ]; then
-            echo "Error: WASM size exceeds the deployment size limit of $MAX_SIZE bytes."
-            exit 1
-          fi
+          WASM_FILES=(
+            contract/target/wasm32v1-none/release/settlex_contract.wasm
+            contract/target/wasm32v1-none/release/settlement_pool_contract.wasm
+          )
+          for WASM_FILE in "${WASM_FILES[@]}"; do
+            if [ ! -f "$WASM_FILE" ]; then
+              echo "Error: WASM file not found: $WASM_FILE"
+              exit 1
+            fi
+            SIZE=$(stat -c%s "$WASM_FILE")
+            MAX_SIZE=131072
+            echo "$WASM_FILE size: $SIZE bytes"
+            if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+              echo "Error: $WASM_FILE exceeds the deployment size limit of $MAX_SIZE bytes."
+              exit 1
+            fi
+          done

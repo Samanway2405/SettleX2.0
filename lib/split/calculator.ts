@@ -155,6 +155,18 @@ export function calculateSplit(
 
 // ─── Validation helpers ───────────────────────────────────────────────────────
 
+export { MIN_SPLIT_WEIGHT, MAX_SPLIT_WEIGHT } from "@/lib/utils/constants";
+import { MIN_SPLIT_WEIGHT, MAX_SPLIT_WEIGHT } from "@/lib/utils/constants";
+
+export function isValidSplitWeight(weight: number | undefined): weight is number {
+  return (
+    typeof weight === "number" &&
+    Number.isInteger(weight) &&
+    weight >= MIN_SPLIT_WEIGHT &&
+    weight <= MAX_SPLIT_WEIGHT
+  );
+}
+
 export function isValidXLMAmount(value: string): boolean {
   try {
     const stroops = xlmToStroops(value);

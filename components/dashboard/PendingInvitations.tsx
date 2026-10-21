@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { useToast } from "@/components/ui/Toast";
 import { useWallet } from "@/hooks/useWallet";
 import { requireAuthenticatedClient } from "@/lib/supabase/session";
-import { formatAddress } from "@/lib/utils";
+import { formatAddress, formatXLM } from "@/lib/utils";
 
 type PendingInvitation = {
   entity_type: "expense" | "trip";
@@ -14,6 +14,8 @@ type PendingInvitation = {
   title: string;
   created_by_wallet: string;
   created_at: string;
+  total_amount?: string;
+  caller_share?: string;
 };
 
 export function PendingInvitations() {
@@ -23,6 +25,7 @@ export function PendingInvitations() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [decliningId, setDecliningId] = useState<string | null>(null);
   const loadSequence = useRef(0);
 
   const loadInvitations = useCallback(async () => {
@@ -57,7 +60,7 @@ export function PendingInvitations() {
   }, [loadInvitations]);
 
   const acceptInvitation = async (invitation: PendingInvitation) => {
-    if (!publicKey || acceptingId) return;
+    if (!publicKey || acceptingId || decliningId) return;
     setAcceptingId(invitation.entity_id);
     try {
       const client = await requireAuthenticatedClient(publicKey);
@@ -82,6 +85,35 @@ export function PendingInvitations() {
       );
     } finally {
       setAcceptingId(null);
+    }
+  };
+
+  const declineInvitation = async (invitation: PendingInvitation) => {
+    if (!publicKey || acceptingId || decliningId) return;
+    setDecliningId(invitation.entity_id);
+    try {
+      const client = await requireAuthenticatedClient(publicKey);
+      const { error } = await client.rpc("decline_invitation", {
+        p_entity_type: invitation.entity_type,
+        p_entity_id: invitation.entity_id,
+      });
+      if (error) throw error;
+
+      setInvitations((current) =>
+        current.filter((item) => item.entity_id !== invitation.entity_id),
+      );
+      window.dispatchEvent(new Event("settlex:consent-changed"));
+      toastSuccess(
+        invitation.entity_type === "expense" ? "Expense declined" : "Trip declined",
+        "The invitation was dismissed and will not affect your balances.",
+      );
+    } catch {
+      toastError(
+        "Could not decline invitation",
+        "Nothing changed. Please retry after checking your connection.",
+      );
+    } finally {
+      setDecliningId(null);
     }
   };
 
@@ -131,6 +163,9 @@ export function PendingInvitations() {
           {invitations.map((invitation) => {
             const Icon = invitation.entity_type === "expense" ? ReceiptText : Map;
             const isAccepting = acceptingId === invitation.entity_id;
+            const isDeclining = decliningId === invitation.entity_id;
+            const isBusy = isAccepting || isDeclining;
+            const isAnyBusy = acceptingId !== null || decliningId !== null;
             const createdDate = new Date(invitation.created_at).toLocaleDateString("en-US", {
               month: "short",
               day: "numeric",
@@ -156,22 +191,51 @@ export function PendingInvitations() {
                         {formatAddress(invitation.created_by_wallet, 5)}
                       </span>
                     </p>
+                    {invitation.total_amount && (
+                      <p className="mt-0.5 text-xs text-[#444]">
+                        Total:{" "}
+                        <span className="font-semibold text-[#0F0F14]">
+                          {formatXLM(invitation.total_amount)} XLM
+                        </span>
+                        {invitation.caller_share && (
+                          <>
+                            {" · "}Your share:{" "}
+                            <span className="font-semibold text-[#2D6600]">
+                              {formatXLM(invitation.caller_share)} XLM
+                            </span>
+                          </>
+                        )}
+                      </p>
+                    )}
                     <p className="mt-1 flex items-center gap-1 text-[11px] text-[#999]">
                       <CalendarDays size={11} aria-hidden="true" />
                       {createdDate}
                     </p>
                   </div>
                 </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  loading={isAccepting}
-                  disabled={acceptingId !== null}
-                  aria-busy={isAccepting}
-                  onClick={() => void acceptInvitation(invitation)}
-                >
-                  Accept
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    loading={isDeclining}
+                    disabled={isAnyBusy}
+                    aria-busy={isDeclining}
+                    onClick={() => void declineInvitation(invitation)}
+                  >
+                    Decline
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    loading={isAccepting}
+                    disabled={isAnyBusy}
+                    aria-busy={isAccepting}
+                    onClick={() => void acceptInvitation(invitation)}
+                  >
+                    Accept
+                  </Button>
+                </div>
               </li>
             );
           })}

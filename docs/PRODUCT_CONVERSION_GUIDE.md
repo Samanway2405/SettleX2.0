@@ -33,7 +33,7 @@
 
 ### What is genuinely strong (keep and build on)
 
-- **Real architecture, not a mock.** Next.js 14 App Router + TypeScript, a working Soroban contract in [contract/src/lib.rs](../contract/src/lib.rs), Horizon payment building in [lib/stellar/buildTransaction.ts](../lib/stellar/buildTransaction.ts), and a real deployed testnet contract.
+- **Real architecture, not a mock.** Next.js 14 App Router + TypeScript, working settlement and pool Soroban contracts in [contract/contracts/settlement/src/lib.rs](../contract/contracts/settlement/src/lib.rs) and [contract/contracts/pool/src/lib.rs](../contract/contracts/pool/src/lib.rs), Horizon payment building in [lib/stellar/buildTransaction.ts](../lib/stellar/buildTransaction.ts), and real deployed testnet contracts.
 - **Non-custodial signing.** The private key never leaves the wallet extension — the app only receives a signed XDR envelope. That is the correct trust model and a genuine selling point.
 - **Test discipline.** 45 JS tests + Rust contract tests, CI workflow, release checklist, runbook. Most "projects" don't have this.
 - **A clean, opinionated design system.** The lime `#B9FF66` / near-black `#0F0F14` palette in [tailwind.config.ts](../tailwind.config.ts) is distinctive and coherent.
@@ -43,7 +43,7 @@
 | # | Gap | Where it shows | Severity |
 |---|-----|----------------|----------|
 | G1 | **Everything runs on Testnet.** No real value ever moves. The whole app is a rehearsal. | [lib/utils/constants.ts](../lib/utils/constants.ts) defaults to `TESTNET` | 🔴 Blocker for "product" |
-| G2 | **The "settlement pool" is an accounting illusion.** Pool credits are internal bookkeeping, *not* custody of real tokens, and `record_payment` **does not verify** the Horizon `tx_hash` it stores. | [docs/ARCHITECTURE_AND_LIMITATIONS.md](./ARCHITECTURE_AND_LIMITATIONS.md) lines 27–28; [contract/src/lib.rs:154](../contract/src/lib.rs#L154) | 🔴 Trust-critical |
+| G2 | **The "settlement pool" is an accounting illusion.** Pool credits are internal bookkeeping, *not* custody of real tokens, and `record_payment` **does not verify** the Horizon `tx_hash` it stores. | [docs/ARCHITECTURE_AND_LIMITATIONS.md](./ARCHITECTURE_AND_LIMITATIONS.md) lines 27–28; [contract/contracts/settlement/src/lib.rs](../contract/contracts/settlement/src/lib.rs) | 🔴 Trust-critical |
 | G3 | **WalletConnect and passkey onboarding still need product-specific configuration.** The maintained Stellar Wallets Kit now supplies the default wallet modules and connection modal, but WalletConnect still needs Reown metadata and passkeys remain a separate roadmap item. | `walletsKit.ts` | 🟡 Medium |
 | G4 | **Not actually installable / not a PWA.** No `manifest.webmanifest`, no service worker, only a single `icon.svg`. `metadataBase` points at `https://settlex.app` and references `/og-image.png` which **does not exist** in [public/](../public/). | [app/layout.tsx:38](../app/layout.tsx#L38), [public/](../public/) | 🟠 High |
 | G4b | **Broken referenced files.** The README links to `docs/QUICKSTART.md`, `docs/SUPABASE_SETUP.md`, `docs/AUTHENTICATION_SETUP.md`, `docs/MANUAL_TESTING_GUIDE.md` — none exist in [docs/](.). The OG image is also missing. Broken links read as "unfinished" to any serious evaluator. | README vs. actual `docs/` | 🟡 Medium |
@@ -386,7 +386,7 @@ This is the deepest gap between "project" and "product," so it gets its own sect
 Per the code and your own [docs/ARCHITECTURE_AND_LIMITATIONS.md](./ARCHITECTURE_AND_LIMITATIONS.md#L27):
 
 1. `buildPaymentTransaction` builds a **native XLM payment** on Horizon; the user signs; it's submitted → a real `tx_hash` results.
-2. Separately, [contract/src/lib.rs `record_payment`](../contract/src/lib.rs#L154) is called with that `tx_hash`. It calls the pool contract's `withdraw` — but the docs state plainly: *"Pool balances are internal contract accounting credits, not native XLM/token custody transfers on-chain,"* and *"record_payment stores provided tx_hash metadata and relies on app flow integrity; it does not cryptographically verify Horizon payment details inside the contract."*
+2. Separately, [the settlement crate's `record_payment`](../contract/contracts/settlement/src/lib.rs) is called with that `tx_hash`. It calls the pool contract's `withdraw` — but the docs state plainly: *"Pool balances are internal contract accounting credits, not native XLM/token custody transfers on-chain,"* and *"record_payment stores provided tx_hash metadata and relies on app flow integrity; it does not cryptographically verify Horizon payment details inside the contract."*
 
 **Translation:** the contract is a **notary that believes whatever the client tells it.** The `tx_hash` it stores could be fabricated, reused from an unrelated transfer, or point to a payment of the wrong amount to the wrong person. The `is_paid` duplicate-guard and `AlreadyPaid` error protect against *double-recording*, not against *lying about the payment*. The "pool" adds an appearance of custody that isn't real.
 

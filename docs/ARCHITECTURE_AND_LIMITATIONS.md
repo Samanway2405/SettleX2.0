@@ -40,8 +40,10 @@ SettleX uses:
   RLS policy reads it through `public.settlex_wallet()`; requests without a
   valid token match no rows.
 - Sessions are cached in `localStorage` and last 1 hour by default
-  (`AUTH_SESSION_TTL_SECONDS`, capped at 12 hours). They re-sign silently before
-  expiry, so the short lifetime is invisible in normal use.
+  (`AUTH_SESSION_TTL_SECONDS`, capped at 12 hours). Renewing a session requires
+  wallet confirmation (SEP-10 challenge signing); the UI displays a visible
+  prompt before expiry so users can re-sign and rebind realtime connections
+  without losing incoming live updates.
 - Every token carries a `jti`. Signing out writes that id to
   `public.revoked_tokens`, and `settlex_wallet()` — the one function every RLS
   policy resolves identity through — returns NULL for a revoked token, so it
@@ -69,7 +71,11 @@ SettleX uses:
   closed: `/api/auth/verify` returns 503 rather than minting a token it cannot
   prove is single-use. The rate limiter deliberately falls back to its local
   window so a database outage does not block every sign-in. That fallback is
-  weaker across instances and is not a substitute for an edge/WAF rate limit.
+  weaker across instances. Client IP rate limiting uses platform-provided IPs
+  (`request.ip` / `x-real-ip` or the last reverse proxy hop) alongside per-wallet
+  rate limits on challenge and verify, but application-level throttling is not a
+  substitute for an edge/WAF rate limit (e.g., Cloudflare WAF, AWS WAF, or Vercel
+  Firewall) in front of the deployment to mitigate distributed floods.
 - **Token revocation — conditionally mitigated.** Current schema and route code
   maintain `revoked_tokens` and `revoked_wallets`, and `settlex_wallet()` denies
   revoked JWTs. This depends on the same service-role configuration and current
@@ -105,6 +111,13 @@ SettleX uses:
   it, a bogus or mistaken record permanently blocks the legitimate one for that
   `(expense_id, member)` pair. It clears the flag only; the original entry stays
   in the trip's payment history so the audit trail is not rewritten.
+- `get_payments` and `is_paid` are pure reads. Their Soroban RPC simulations do
+  not commit storage writes, so they do not extend TTLs. A keeper or participant
+  must submit the permissionless `extend_trip(trip_id, payment_offset,
+  expense_offset, limit)` function as a real transaction, repeating with its
+  returned cursors until both are `None`. If data has already archived, the
+  transaction must include the relevant archived footprint so Soroban can
+  restore it before the TTL bump.
 
 ## Operational Constraints
 

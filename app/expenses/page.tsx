@@ -22,6 +22,7 @@ import { ExpenseForm } from "@/components/expenses/ExpenseForm";
 import { SplitCalculator } from "@/components/expenses/SplitCalculator";
 import { PaymentStatus } from "@/components/payment/PaymentStatus";
 import { useToast } from "@/components/ui/Toast";
+import { formatXLM } from "@/lib/utils";
 import type { Expense, SplitShare } from "@/types/expense";
 
 // ─── Expense Card ─────────────────────────────────────────────────────────────
@@ -48,7 +49,6 @@ function ExpenseCard({
   const { payShare, paymentState, reset, retryOnChainRecord } = usePayment({ expenseId: expense.id });
 
   const paidCount = expense.shares.filter((s) => s.paid).length;
-  const total = parseFloat(expense.totalAmount);
   const payer = expense.members.find((m) => m.id === expense.paidByMemberId);
   const createdAt = new Date(expense.createdAt).toLocaleDateString("en-US", {
     month: "short",
@@ -65,13 +65,6 @@ function ExpenseCard({
     });
     setPayingShareId(null);
   };
-  const paidCount = expense.shares.filter((s) => s.paid).length;
-  const payer = expense.members.find((m) => m.id === expense.paidByMemberId);
-  const createdAt = new Date(expense.createdAt).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
 
   return (
     <motion.div

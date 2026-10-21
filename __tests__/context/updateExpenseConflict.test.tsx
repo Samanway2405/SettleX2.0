@@ -17,8 +17,10 @@ const { render, screen, waitFor, act } = require("@testing-library/react");
 
 const WALLET = "GDQNY3PBOJOKYZSRMK2S7LHHGWZIUISD4QORETLMXEWXBI7KFZZMKTL3";
 
+// Stable across renders: getClient lists `reconcile` as a dependency.
+const mockReconcile = jest.fn(async () => {});
 jest.mock("@/context/WalletContext", () => ({
-  useWalletContext: () => ({ publicKey: WALLET }),
+  useWalletContext: () => ({ publicKey: WALLET, reconcile: mockReconcile }),
 }));
 
 jest.mock("@/lib/supabase/session", () => ({

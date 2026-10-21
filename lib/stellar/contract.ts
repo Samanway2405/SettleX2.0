@@ -15,6 +15,7 @@ import {
   HORIZON_URL,
 } from "@/lib/utils/constants";
 import { logWarn, reportError } from "@/lib/observability/logger";
+import { xlmToStroops } from "@/lib/split/calculator";
 import type {
   ContractPaymentRecord,
   GetPaymentsResult,
@@ -112,8 +113,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export { xlmToStroops, stroopsToXlm } from "@/lib/split/calculator";
-
 function contractReady(caller: string): boolean {
   if (!CONTRACT_ID) {
     logWarn("contract.not_configured", {
@@ -162,7 +161,8 @@ export async function precheckPoolBalance(
     return { ok: false, requiredStroops, error: "Contract not configured." };
   }
 
-  // The pool requirement has been removed, so balance is always sufficient.
+  // Pure ledger write model (Issue #131): recording payments is a pure ledger write
+  // to the SettleX contract and does not require pre-funded pool credits.
   return { ok: true, requiredStroops, balanceStroops: requiredStroops };
 }
 
@@ -287,6 +287,8 @@ export async function getContractPayments(
       next_offset?: number | bigint | null;
     };
 
+    // This is intentionally simulation-only. get_payments is a pure read;
+    // TTL maintenance must be submitted as an extend_trip transaction.
     const rawPayments: RawPayment[] = [];
     let offset = 0;
 
@@ -389,6 +391,7 @@ export async function checkIsPaid(
       .setTimeout(30)
       .build();
 
+    // This is intentionally simulation-only. is_paid does not mutate TTLs.
     const simResult = await sorobanServer.simulateTransaction(tx);
 
     if (

@@ -30,6 +30,7 @@ describe("usePayment integration flow", () => {
 
   const mockRefreshBalance = jest.fn();
   const mockRefreshNetwork = jest.fn(async () => "TESTNET");
+  const mockReconcile = jest.fn(async () => {});
   const mockMarkSharePaid = jest.fn(async (_expenseId: string, _memberId: string, _txHash: string) => {});
   const mockToastSuccess = jest.fn();
   const mockToastError = jest.fn();
@@ -50,6 +51,7 @@ describe("usePayment integration flow", () => {
       publicKey: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       refreshBalance: mockRefreshBalance,
       refreshNetwork: mockRefreshNetwork,
+      reconcile: mockReconcile,
       isNetworkCompatible: true,
       networkStatus: "matched",
       expectedNetwork: "TESTNET",
@@ -65,7 +67,11 @@ describe("usePayment integration flow", () => {
       info: mockToastInfo,
     });
 
-    jest.mocked(buildPaymentTransaction).mockResolvedValue({ xdr: "unsigned-xdr", memo: "SettleX|Dinner" });
+    jest.mocked(buildPaymentTransaction).mockResolvedValue({
+      xdr: "unsigned-xdr",
+      memo: "SettleX|Dinner",
+      fee: "100",
+    });
     jest.mocked(signXDR).mockResolvedValue("signed-xdr");
     jest.mocked(submitSignedTransaction).mockResolvedValue({
       hash: "tx-hash-123",
@@ -107,6 +113,7 @@ describe("usePayment integration flow", () => {
       publicKey: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       refreshBalance: mockRefreshBalance,
       refreshNetwork: jest.fn(async () => "PUBLIC"),
+      reconcile: mockReconcile,
       isNetworkCompatible: false,
       networkStatus: "mismatched",
       expectedNetwork: "TESTNET",
