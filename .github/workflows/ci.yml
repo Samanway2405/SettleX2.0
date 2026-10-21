@@ -78,8 +78,18 @@ jobs:
 
       - name: Validate Supabase SQL Syntax
         run: |
-          docker run --name pg-lint -e POSTGRES_PASSWORD=postgres -d postgres
-          docker exec -i pg-lint sh -c 'until pg_isready -U postgres; do sleep 1; done'
+          docker run --name pg-lint -e POSTGRES_PASSWORD=postgres -d postgres:16 -c wal_level=logical
+          trap 'docker rm -f pg-lint >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 60); do
+            if docker exec pg-lint pg_isready -U postgres; then
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "PostgreSQL did not become ready within 60 seconds."
+              exit 1
+            fi
+            sleep 1
+          done
           docker exec -i pg-lint psql -U postgres -c "CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role; CREATE PUBLICATION supabase_realtime;"
           echo "Validating supabase-setup.sql..."
           docker exec -i pg-lint psql -U postgres -v ON_ERROR_STOP=1 -f - < supabase-setup.sql
@@ -90,7 +100,6 @@ jobs:
             echo "Applying $mig"
             docker exec -i pg-lint psql -U postgres -d settlex_migrations -v ON_ERROR_STOP=1 -f - < "$mig"
           done
-          docker rm -f pg-lint
 
       - name: Test with coverage gate
         run: npm run test:coverage -- --runInBand

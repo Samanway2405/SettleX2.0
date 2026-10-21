@@ -73,7 +73,7 @@ export const CONFIG_REQUIREMENTS: readonly ConfigRequirement[] = [
   },
   {
     name: "SUPABASE_SERVICE_ROLE_KEY",
-    requirement: "required",
+    requirement: "recommended",
     buildTime: false,
     impact:
       "Replay guard and rate limiter fall back to per-process memory, which does not hold across instances; sign-out cannot revoke.",
