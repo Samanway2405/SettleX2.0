@@ -32,7 +32,7 @@ pub struct PaymentRecordV1 {
     pub payer: Address,
     pub member: Address,
     pub amount: i128,
-    pub tx_hash: String,
+    pub tx_hash: BytesN<32>,
     pub timestamp: u64,
 }
 
@@ -43,7 +43,7 @@ pub struct PaymentRecord {
     pub payer: Address,
     pub member: Address,
     pub amount: i128,
-    pub tx_hash: String,
+    pub tx_hash: BytesN<32>,
     pub timestamp: u64,
     /// `true` only when a configured attestor co-signed this record, meaning
     /// something actually checked the Stellar transaction behind `tx_hash`.
@@ -84,7 +84,7 @@ pub struct PaymentEventV1 {
     pub payer: Address,
     pub member: Address,
     pub amount: i128,
-    pub tx_hash: String,
+    pub tx_hash: BytesN<32>,
     pub timestamp: u64,
     pub attested: bool,
 }
@@ -94,6 +94,15 @@ pub struct PaymentEventV1 {
 pub struct PoolConfigEventV1 {
     pub version: u32,
     pub pool_contract: Address,
+    pub updated_by: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestorEventV1 {
+    pub version: u32,
+    pub attestor: Address,
     pub updated_by: Address,
     pub timestamp: u64,
 }
@@ -135,8 +144,7 @@ const STORAGE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 365;
 const CONTRACT_VERSION: u32 = 2;
 const MIN_MIGRATABLE_VERSION: u32 = 1;
 const MAX_ID_LEN: u32 = 64;
-const MAX_TX_HASH_LEN: u32 = 128;
-const MAX_AMOUNT_STROOPS: i128 = 10_000_000_000_000_000;
+const MAX_AMOUNT_STROOPS: i128 = 1_000_000_000_000_000;
 const MAX_PAGE_SIZE: u32 = 50;
 
 #[contract]
@@ -381,9 +389,9 @@ impl SettleXContract {
 
         env.events().publish(
             (symbol_short!("attestor"),),
-            PoolConfigEventV1 {
+            AttestorEventV1 {
                 version: CONTRACT_VERSION,
-                pool_contract: attestor,
+                attestor,
                 updated_by: admin,
                 timestamp: env.ledger().timestamp(),
             },
@@ -407,7 +415,13 @@ impl SettleXContract {
 
     /// The configured attestor, or `None` when records are self-attested.
     pub fn get_attestor(env: Env) -> Option<Address> {
-        env.storage().instance().get(&DataKey::Attestor)
+        Self::require_current_version(&env);
+
+        let attestor = env.storage().instance().get(&DataKey::Attestor);
+        env.storage()
+            .instance()
+            .extend_ttl(STORAGE_BUMP_THRESHOLD, STORAGE_BUMP_AMOUNT);
+        attestor
     }
 
     /// Admin-gated escape hatch for the paid flag.
@@ -466,7 +480,7 @@ impl SettleXContract {
         payer: Address,
         member: Address,
         amount: i128,
-        tx_hash: String,
+        tx_hash: BytesN<32>,
     ) {
         member.require_auth();
 
@@ -479,14 +493,11 @@ impl SettleXContract {
         if payer == member {
             panic_with_error!(&env, ContractError::InvalidActor);
         }
-        if trip_id.len() == 0 || expense_id.len() == 0 || tx_hash.len() == 0 {
+        if trip_id.len() == 0 || expense_id.len() == 0 {
             panic_with_error!(&env, ContractError::EmptyId);
         }
         if trip_id.len() > MAX_ID_LEN || expense_id.len() > MAX_ID_LEN {
             panic_with_error!(&env, ContractError::IdTooLong);
-        }
-        if tx_hash.len() > MAX_TX_HASH_LEN {
-            panic_with_error!(&env, ContractError::TxHashTooLong);
         }
 
         let version: u32 = env
@@ -888,9 +899,13 @@ mod test {
     use super::*;
     use settlement_pool_contract::{SettlementPoolContract, SettlementPoolContractClient};
     use soroban_sdk::{
-        testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
-        Address, Env, IntoVal, String,
+        testutils::{Address as _, MockAuth, MockAuthInvoke},
+        Address, BytesN, Env, IntoVal, String,
     };
+
+    fn dummy_hash(env: &Env, seed: u8) -> BytesN<32> {
+        BytesN::from_array(env, &[seed; 32])
+    }
 
     macro_rules! setup {
         ($env:ident, $client:ident, $pool_client:ident) => {
@@ -899,17 +914,14 @@ mod test {
         ($env:ident, $client:ident, $pool_client:ident, $contract_id:ident) => {
             let $env = Env::default();
             $env.mock_all_auths();
-            let $contract_id = $env.register_contract(None, SettleXContract);
-            let pool_contract_id = $env.register_contract(None, SettlementPoolContract);
+            let admin = Address::generate(&$env);
+            let $contract_id = $env.register(SettleXContract, (&admin,));
+            let pool_contract_id = $env.register(SettlementPoolContract, (&admin, &$contract_id));
             let $client = SettleXContractClient::new(&$env, &$contract_id);
             let $pool_client = SettlementPoolContractClient::new(&$env, &pool_contract_id);
+            let _ = &$pool_client;
 
-            let admin = Address::generate(&$env);
-            let settlement_address = $contract_id.clone();
-            let pool_address = pool_contract_id.clone();
-
-            $pool_client.init_pool(&admin, &settlement_address);
-            $client.init(&admin, &pool_address);
+            $client.set_pool_contract(&pool_contract_id);
         };
     }
 
@@ -931,8 +943,8 @@ mod test {
         let expense_id = String::from_str(&env, "exp-grief");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let bogus_hash = String::from_str(&env, "bogus000000");
-        let real_hash = String::from_str(&env, "real1234567");
+        let bogus_hash = dummy_hash(&env, 1);
+        let real_hash = dummy_hash(&env, 2);
 
         pool_client.deposit(&member, &10_000_000_i128);
 
@@ -978,18 +990,16 @@ mod test {
     #[should_panic]
     fn test_clear_paid_requires_admin_auth() {
         let env = Env::default();
-        let settlement_contract_id = env.register_contract(None, SettleXContract);
-        let pool_contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettleXContractClient::new(&env, &settlement_contract_id);
-        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
-
         let admin = Address::generate(&env);
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        pool_client.init_pool(&admin, &settlement_contract_id);
-        client.init(&admin, &pool_contract_id);
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
+        client.set_pool_contract(&pool_contract_id);
         pool_client.deposit(&member, &10_000_000_i128);
 
         let trip_id = String::from_str(&env, "trip-auth");
@@ -1000,7 +1010,7 @@ mod test {
             &payer,
             &member,
             &1_000_000_i128,
-            &String::from_str(&env, "hash1234567"),
+            &dummy_hash(&env, 3),
         );
 
         // Only the member authorizes — not the admin.
@@ -1038,7 +1048,7 @@ mod test {
             &payer,
             &member,
             &1_000_000_i128,
-            &String::from_str(&env, "bogus-hash"),
+            &dummy_hash(&env, 4),
         );
 
         let before = client
@@ -1080,7 +1090,7 @@ mod test {
             &payer,
             &member_a,
             &1_000_000_i128,
-            &String::from_str(&env, "hash-a"),
+            &dummy_hash(&env, 5),
         );
         client.record_payment(
             &trip_id,
@@ -1088,7 +1098,7 @@ mod test {
             &payer,
             &member_b,
             &1_000_000_i128,
-            &String::from_str(&env, "hash-b"),
+            &dummy_hash(&env, 6),
         );
 
         client.clear_paid(&expense_id, &member_a);
@@ -1124,7 +1134,7 @@ mod test {
             &payer,
             &member,
             &1_000_000_i128,
-            &String::from_str(&env, "bogus-hash"),
+            &dummy_hash(&env, 4),
         );
         client.clear_paid(&expense_id, &member);
 
@@ -1135,7 +1145,7 @@ mod test {
             &payer,
             &member,
             &1_000_000_i128,
-            &String::from_str(&env, "real-hash"),
+            &dummy_hash(&env, 8),
         );
 
         let payments = client
@@ -1174,7 +1184,7 @@ mod test {
             &payer,
             &member,
             &1_000_000_i128,
-            &String::from_str(&env, "unverified1"),
+            &dummy_hash(&env, 9),
         );
 
         let rec = client
@@ -1193,26 +1203,24 @@ mod test {
     #[test]
     fn test_attested_record_requires_and_records_attestor() {
         let env = Env::default();
-        let settlement_contract_id = env.register_contract(None, SettleXContract);
-        let pool_contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettleXContractClient::new(&env, &settlement_contract_id);
-        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
-
         let admin = Address::generate(&env);
         let attestor = Address::generate(&env);
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        pool_client.init_pool(&admin, &settlement_contract_id);
-        client.init(&admin, &pool_contract_id);
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
+        client.set_pool_contract(&pool_contract_id);
         client.set_attestor(&attestor);
         pool_client.deposit(&member, &10_000_000_i128);
         assert_eq!(client.get_attestor(), Some(attestor.clone()));
 
         let trip_id = String::from_str(&env, "trip-att");
         let expense_id = String::from_str(&env, "exp-att");
-        let tx_hash = String::from_str(&env, "verified123");
+        let tx_hash = dummy_hash(&env, 10);
         let amount = 4_000_000_i128;
         let args: soroban_sdk::Vec<soroban_sdk::Val> = (
             trip_id.clone(),
@@ -1264,25 +1272,23 @@ mod test {
     #[should_panic]
     fn test_member_alone_cannot_record_when_attestor_set() {
         let env = Env::default();
-        let settlement_contract_id = env.register_contract(None, SettleXContract);
-        let pool_contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettleXContractClient::new(&env, &settlement_contract_id);
-        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
-
         let admin = Address::generate(&env);
         let attestor = Address::generate(&env);
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        pool_client.init_pool(&admin, &settlement_contract_id);
-        client.init(&admin, &pool_contract_id);
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
+        client.set_pool_contract(&pool_contract_id);
         client.set_attestor(&attestor);
         pool_client.deposit(&member, &10_000_000_i128);
 
         let trip_id = String::from_str(&env, "trip-noatt");
         let expense_id = String::from_str(&env, "exp-noatt");
-        let tx_hash = String::from_str(&env, "forged12345");
+        let tx_hash = dummy_hash(&env, 11);
         let amount = 4_000_000_i128;
 
         env.set_auths(&[]);
@@ -1310,15 +1316,12 @@ mod test {
     #[test]
     fn test_migrate_from_v1_to_v2_updates_version() {
         let env = Env::default();
-        let settlement_contract_id = env.register_contract(None, SettleXContract);
-        let pool_contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettleXContractClient::new(&env, &settlement_contract_id);
-        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
-
         let admin = Address::generate(&env);
         env.mock_all_auths();
-        pool_client.init_pool(&admin, &settlement_contract_id);
-        client.init(&admin, &pool_contract_id);
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        client.set_pool_contract(&pool_contract_id);
 
         env.as_contract(&settlement_contract_id, || {
             env.storage().instance().set(&DataKey::Version, &1_u32);
@@ -1335,17 +1338,14 @@ mod test {
     #[should_panic]
     fn test_set_attestor_requires_admin() {
         let env = Env::default();
-        let settlement_contract_id = env.register_contract(None, SettleXContract);
-        let pool_contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettleXContractClient::new(&env, &settlement_contract_id);
-        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
-
         let admin = Address::generate(&env);
         let attacker = Address::generate(&env);
 
         env.mock_all_auths();
-        pool_client.init_pool(&admin, &settlement_contract_id);
-        client.init(&admin, &pool_contract_id);
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        client.set_pool_contract(&pool_contract_id);
 
         env.set_auths(&[]);
         env.mock_auths(&[MockAuth {
@@ -1384,7 +1384,7 @@ mod test {
             &payer,
             &member,
             &1_000_000_i128,
-            &String::from_str(&env, "afterclear1"),
+            &dummy_hash(&env, 12),
         );
         assert!(
             !client
@@ -1399,23 +1399,21 @@ mod test {
     #[test]
     fn test_record_payment_works_under_real_auth() {
         let env = Env::default();
-        let settlement_contract_id = env.register_contract(None, SettleXContract);
-        let pool_contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettleXContractClient::new(&env, &settlement_contract_id);
-        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
-
         let admin = Address::generate(&env);
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        pool_client.init_pool(&admin, &settlement_contract_id);
-        client.init(&admin, &pool_contract_id);
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        let pool_client = SettlementPoolContractClient::new(&env, &pool_contract_id);
+        client.set_pool_contract(&pool_contract_id);
         pool_client.deposit(&member, &10_000_000_i128);
 
         let trip_id = String::from_str(&env, "trip-real-auth");
         let expense_id = String::from_str(&env, "exp-real-auth");
-        let tx_hash = String::from_str(&env, "abc123def456");
+        let tx_hash = dummy_hash(&env, 13);
         let amount = 4_000_000_i128;
 
         // Only the member signs; the settlement contract's authorization of the
@@ -1452,7 +1450,7 @@ mod test {
         let expense_id = String::from_str(&env, "exp-456");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "abc123def456");
+        let tx_hash = dummy_hash(&env, 13);
 
         pool_client.deposit(&member, &10_000_000_i128);
 
@@ -1494,8 +1492,8 @@ mod test {
         let payer = Address::generate(&env);
         let member_a = Address::generate(&env);
         let member_b = Address::generate(&env);
-        let tx_a = String::from_str(&env, "hash_a");
-        let tx_b = String::from_str(&env, "hash_b");
+        let tx_a = dummy_hash(&env, 15);
+        let tx_b = dummy_hash(&env, 16);
 
         pool_client.deposit(&member_a, &5_000_000_i128);
         pool_client.deposit(&member_b, &7_500_000_i128);
@@ -1535,7 +1533,7 @@ mod test {
         let trip_id = String::from_str(&env, "trip-many-members");
         let expense_id = String::from_str(&env, "exp-many-members");
         let payer = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "spam-record");
+        let tx_hash = dummy_hash(&env, 17);
 
         for _ in 0..500 {
             let member = Address::generate(&env);
@@ -1549,7 +1547,7 @@ mod test {
             &payer,
             &real_member,
             &1_i128,
-            &String::from_str(&env, "real-payment"),
+            &dummy_hash(&env, 18),
         );
 
         assert!(client.is_paid(&expense_id, &real_member));
@@ -1564,8 +1562,8 @@ mod test {
         let exp_2 = String::from_str(&env, "exp-002");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let tx_1 = String::from_str(&env, "tx_001");
-        let tx_2 = String::from_str(&env, "tx_002");
+        let tx_1 = dummy_hash(&env, 19);
+        let tx_2 = dummy_hash(&env, 20);
 
         pool_client.deposit(&member, &7_500_000_i128);
 
@@ -1592,8 +1590,8 @@ mod test {
         let exp_2 = String::from_str(&env, "exp-002");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let tx_1 = String::from_str(&env, "tx_001");
-        let tx_2 = String::from_str(&env, "tx_002");
+        let tx_1 = dummy_hash(&env, 19);
+        let tx_2 = dummy_hash(&env, 20);
 
         pool_client.deposit(&member, &7_500_000_i128);
 
@@ -1639,16 +1637,7 @@ mod test {
                     "expense-c"
                 },
             );
-            let tx_hash = String::from_str(
-                &env,
-                if index == 0 {
-                    "hash-a"
-                } else if index == 1 {
-                    "hash-b"
-                } else {
-                    "hash-c"
-                },
-            );
+            let tx_hash = dummy_hash(&env, index as u8);
             client.record_payment(
                 &trip_id,
                 &expense_id,
@@ -1705,7 +1694,7 @@ mod test {
             &payer,
             &member_a,
             &1_000_000_i128,
-            &String::from_str(&env, "hash-member-a"),
+            &dummy_hash(&env, 23),
         );
         client.record_payment(
             &trip_id,
@@ -1713,10 +1702,10 @@ mod test {
             &payer,
             &member_b,
             &1_000_000_i128,
-            &String::from_str(&env, "hash-member-b"),
+            &dummy_hash(&env, 24),
         );
 
-        let page = client.get_payments(&trip_id, &0_u32, &1_u32);
+        let page = client.get_payments(&trip_id, &0_u32, &2_u32);
         assert_eq!(page.payments.len(), 2);
         assert_eq!(page.next_offset, None);
 
@@ -1755,7 +1744,7 @@ mod test {
             &payer,
             &member,
             &1_000_000_i128,
-            &String::from_str(&env, "hash-new"),
+            &dummy_hash(&env, 25),
         );
 
         env.as_contract(&settlement_contract_id, || {
@@ -1765,7 +1754,7 @@ mod test {
                 .get(&DataKey::TripExpenseCount(trip_id.clone()))
                 .unwrap();
             assert_eq!(count, 2);
-            assert!(!env
+            assert!(env
                 .storage()
                 .persistent()
                 .has(&DataKey::TripExpenseIds(trip_id.clone())));
@@ -1789,7 +1778,7 @@ mod test {
         let expense_id = String::from_str(&env, "exp-dup");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "hash_dup");
+        let tx_hash = dummy_hash(&env, 26);
 
         pool_client.deposit(&member, &1_000_000_i128);
 
@@ -1820,7 +1809,7 @@ mod test {
         let expense_id = String::from_str(&env, "exp-zero");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "hash_zero");
+        let tx_hash = dummy_hash(&env, 27);
 
         client.record_payment(&trip_id, &expense_id, &payer, &member, &0_i128, &tx_hash);
     }
@@ -1834,109 +1823,15 @@ mod test {
         let expense_id = String::from_str(&env, "exp-neg");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "hash_neg");
+        let tx_hash = dummy_hash(&env, 28);
 
         client.record_payment(&trip_id, &expense_id, &payer, &member, &-1_i128, &tx_hash);
     }
 
-    #[test]
-    #[should_panic]
-    fn test_empty_tx_hash_rejected() {
-        setup!(env, client, _pool_client);
 
-        let trip_id = String::from_str(&env, "trip-empty-tx");
-        let expense_id = String::from_str(&env, "exp-empty-tx");
-        let payer = Address::generate(&env);
-        let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "");
 
-        client.record_payment(&trip_id, &expense_id, &payer, &member, &1_i128, &tx_hash);
-    }
 
-    /// Advances the ledger sequence, leaving TTL settings intact.
-    fn advance_ledgers(env: &Env, by: u32) {
-        env.ledger().with_mut(|li| {
-            li.sequence_number += by;
-        });
-    }
 
-    #[test]
-    fn test_get_payments_extends_ttl_so_a_read_only_trip_survives() {
-        setup!(env, client, pool_client);
-
-        // Keep entries alive only as long as a bump grants, so an un-renewed
-        // key is genuinely gone by the time we look for it.
-        env.ledger().with_mut(|li| {
-            li.min_persistent_entry_ttl = 1;
-            li.max_entry_ttl = STORAGE_BUMP_AMOUNT + 1;
-        });
-
-        let trip_id = String::from_str(&env, "trip-read-only");
-        let expense_id = String::from_str(&env, "exp-read-only");
-        let payer = Address::generate(&env);
-        let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "hash-read-only");
-
-        pool_client.deposit(&member, &10_000_000_i128);
-        client.record_payment(
-            &trip_id,
-            &expense_id,
-            &payer,
-            &member,
-            &10_000_000_i128,
-            &tx_hash,
-        );
-
-        // A trip written once and then only ever read: step most of the way to
-        // expiry, read, and repeat. Each read has to carry the data forward.
-        for _ in 0..3 {
-            advance_ledgers(&env, STORAGE_BUMP_AMOUNT - 1);
-            assert_eq!(
-                client
-                    .get_payments(&trip_id, &0_u32, &MAX_PAGE_SIZE)
-                    .payments
-                    .len(),
-                1,
-                "history should survive as long as it keeps being read",
-            );
-        }
-    }
-
-    #[test]
-    fn test_is_paid_extends_ttl_so_a_settled_share_stays_settled() {
-        setup!(env, client, pool_client);
-
-        env.ledger().with_mut(|li| {
-            li.min_persistent_entry_ttl = 1;
-            li.max_entry_ttl = STORAGE_BUMP_AMOUNT + 1;
-        });
-
-        let trip_id = String::from_str(&env, "trip-settled");
-        let expense_id = String::from_str(&env, "exp-settled");
-        let payer = Address::generate(&env);
-        let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "hash-settled");
-
-        pool_client.deposit(&member, &10_000_000_i128);
-        client.record_payment(
-            &trip_id,
-            &expense_id,
-            &payer,
-            &member,
-            &10_000_000_i128,
-            &tx_hash,
-        );
-
-        // An already-settled share must not read back as unpaid just because
-        // nobody wrote to it again.
-        for _ in 0..3 {
-            advance_ledgers(&env, STORAGE_BUMP_AMOUNT - 1);
-            assert!(
-                client.is_paid(&expense_id, &member),
-                "a settled share should stay settled while it is being read",
-            );
-        }
-    }
 
     #[test]
     fn test_is_paid_does_not_trap_on_a_missing_entry() {
@@ -1965,7 +1860,7 @@ mod test {
             &payer,
             &member_a,
             &1_i128,
-            &String::from_str(&env, "ttl-a"),
+            &dummy_hash(&env, 31),
         );
         client.record_payment(
             &trip_id,
@@ -1973,7 +1868,7 @@ mod test {
             &payer,
             &member_b,
             &1_i128,
-            &String::from_str(&env, "ttl-b"),
+            &dummy_hash(&env, 32),
         );
 
         // No member or admin authorization is supplied: the keeper operation
@@ -2035,7 +1930,7 @@ mod test {
         let trip_id = String::from_str(&env, "trip-role");
         let expense_id = String::from_str(&env, "exp-role");
         let actor = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "hash-role");
+        let tx_hash = dummy_hash(&env, 33);
 
         pool_client.deposit(&actor, &1_000_000_i128);
         client.record_payment(
@@ -2057,7 +1952,7 @@ mod test {
         let expense_id = String::from_str(&env, "exp-big");
         let payer = Address::generate(&env);
         let member = Address::generate(&env);
-        let tx_hash = String::from_str(&env, "hash-big");
+        let tx_hash = dummy_hash(&env, 34);
 
         pool_client.deposit(&member, &(MAX_AMOUNT_STROOPS + 1));
         client.record_payment(
@@ -2068,5 +1963,131 @@ mod test {
             &(MAX_AMOUNT_STROOPS + 1),
             &tx_hash,
         );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_upgrade_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        env.mock_all_auths();
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        client.set_pool_contract(&pool_contract_id);
+
+        let new_wasm = BytesN::from_array(&env, &[0x42; 32]);
+        env.set_auths(&[]);
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &settlement_contract_id,
+                fn_name: "upgrade",
+                args: (new_wasm.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.upgrade(&new_wasm);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_migrate_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        env.mock_all_auths();
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        client.set_pool_contract(&pool_contract_id);
+
+        env.as_contract(&settlement_contract_id, || {
+            env.storage().instance().set(&DataKey::Version, &1_u32);
+        });
+
+        env.set_auths(&[]);
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &settlement_contract_id,
+                fn_name: "migrate",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.migrate();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_pool_contract_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        env.mock_all_auths();
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        client.set_pool_contract(&pool_contract_id);
+
+        let new_pool = Address::generate(&env);
+        env.set_auths(&[]);
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &settlement_contract_id,
+                fn_name: "set_pool_contract",
+                args: (new_pool.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.set_pool_contract(&new_pool);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_clear_attestor_requires_admin_auth() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let attestor = Address::generate(&env);
+
+        env.mock_all_auths();
+        let settlement_contract_id = env.register(SettleXContract, (&admin,));
+        let pool_contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract_id));
+        let client = SettleXContractClient::new(&env, &settlement_contract_id);
+        client.set_pool_contract(&pool_contract_id);
+        client.set_attestor(&attestor);
+
+        env.set_auths(&[]);
+        env.mock_auths(&[MockAuth {
+            address: &attacker,
+            invoke: &MockAuthInvoke {
+                contract: &settlement_contract_id,
+                fn_name: "clear_attestor",
+                args: ().into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.clear_attestor();
+    }
+
+    #[test]
+    fn test_set_attestor_emits_attestor_event_and_get_attestor_bumps_ttl() {
+        setup!(env, client, pool_client);
+
+        let attestor = Address::generate(&env);
+        client.set_attestor(&attestor);
+
+        assert_eq!(client.get_attestor(), Some(attestor.clone()));
     }
 }

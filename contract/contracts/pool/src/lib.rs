@@ -56,7 +56,7 @@ const STORAGE_BUMP_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
 const STORAGE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 365;
 const CONTRACT_VERSION: u32 = 1;
 const MIN_MIGRATABLE_VERSION: u32 = 1;
-const MAX_AMOUNT_STROOPS: i128 = 10_000_000_000_000_000;
+const MAX_AMOUNT_STROOPS: i128 = 1_000_000_000_000_000;
 
 #[contract]
 pub struct SettlementPoolContract;
@@ -330,17 +330,16 @@ mod test {
         ($env:ident, $client:ident, $admin:ident, $settlement:ident) => {
             let $env = Env::default();
             $env.mock_all_auths();
-            let contract_id = $env.register_contract(None, SettlementPoolContract);
-            let $client = SettlementPoolContractClient::new(&$env, &contract_id);
             let $admin = Address::generate(&$env);
             let $settlement = Address::generate(&$env);
+            let contract_id = $env.register(SettlementPoolContract, (&$admin, &$settlement));
+            let $client = SettlementPoolContractClient::new(&$env, &contract_id);
         };
     }
 
     #[test]
     fn test_balance_of_missing_member_is_zero() {
         setup_pool!(env, client, admin, settlement_contract);
-        client.init_pool(&admin, &settlement_contract);
 
         let member = Address::generate(&env);
         assert_eq!(client.balance_of(&member), 0_i128);
@@ -360,14 +359,13 @@ mod test {
     #[should_panic]
     fn test_direct_member_withdraw_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettlementPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let settlement_contract = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        client.init_pool(&admin, &settlement_contract);
+        let contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract));
+        let client = SettlementPoolContractClient::new(&env, &contract_id);
         client.deposit(&member, &1_000_000_i128);
 
         // From here on, only what is explicitly listed is authorized.
@@ -392,15 +390,14 @@ mod test {
     #[should_panic]
     fn test_withdraw_by_unconfigured_contract_rejected() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettlementPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let settlement_contract = Address::generate(&env);
         let impostor = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        client.init_pool(&admin, &settlement_contract);
+        let contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract));
+        let client = SettlementPoolContractClient::new(&env, &contract_id);
         client.deposit(&member, &1_000_000_i128);
 
         env.set_auths(&[]);
@@ -435,14 +432,13 @@ mod test {
     #[test]
     fn test_withdraw_allowed_for_configured_settlement_contract() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettlementPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let settlement_contract = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        client.init_pool(&admin, &settlement_contract);
+        let contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract));
+        let client = SettlementPoolContractClient::new(&env, &contract_id);
         client.deposit(&member, &1_000_000_i128);
 
         env.set_auths(&[]);
@@ -478,14 +474,13 @@ mod test {
     #[should_panic]
     fn test_settlement_contract_alone_cannot_withdraw() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettlementPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let settlement_contract = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        client.init_pool(&admin, &settlement_contract);
+        let contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract));
+        let client = SettlementPoolContractClient::new(&env, &contract_id);
         client.deposit(&member, &1_000_000_i128);
 
         env.set_auths(&[]);
@@ -508,15 +503,14 @@ mod test {
     #[should_panic]
     fn test_rotated_settlement_contract_revokes_old_one() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettlementPoolContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let old_settlement = Address::generate(&env);
         let new_settlement = Address::generate(&env);
         let member = Address::generate(&env);
 
         env.mock_all_auths();
-        client.init_pool(&admin, &old_settlement);
+        let contract_id = env.register(SettlementPoolContract, (&admin, &old_settlement));
+        let client = SettlementPoolContractClient::new(&env, &contract_id);
         client.deposit(&member, &1_000_000_i128);
         client.set_settlement_contract(&new_settlement);
 
@@ -551,8 +545,6 @@ mod test {
     #[test]
     fn test_init_and_get_config() {
         setup_pool!(env, client, admin, settlement_contract);
-
-        client.init_pool(&admin, &settlement_contract);
         let cfg = client.get_config();
 
         assert_eq!(cfg.admin, admin);
@@ -573,7 +565,6 @@ mod test {
         setup_pool!(env, client, admin, settlement_contract);
 
         let member = Address::generate(&env);
-        client.init_pool(&admin, &settlement_contract);
 
         client.deposit(&member, &1_500_000_i128);
         assert_eq!(client.balance_of(&member), 1_500_000_i128);
@@ -584,7 +575,6 @@ mod test {
         setup_pool!(env, client, admin, settlement_contract);
 
         let member = Address::generate(&env);
-        client.init_pool(&admin, &settlement_contract);
 
         client.deposit(&member, &2_000_000_i128);
         client.withdraw(&member, &700_000_i128);
@@ -598,7 +588,6 @@ mod test {
         setup_pool!(env, client, admin, settlement_contract);
 
         let member = Address::generate(&env);
-        client.init_pool(&admin, &settlement_contract);
 
         client.deposit(&member, &100_000_i128);
         client.withdraw(&member, &200_000_i128);
@@ -609,7 +598,6 @@ mod test {
         setup_pool!(env, client, admin, settlement_contract);
 
         let next_contract = Address::generate(&env);
-        client.init_pool(&admin, &settlement_contract);
         client.set_settlement_contract(&next_contract);
 
         let cfg = client.get_config();
@@ -621,11 +609,8 @@ mod test {
     fn test_init_rejects_same_admin_and_settlement() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, SettlementPoolContract);
-        let client = SettlementPoolContractClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
-        client.init_pool(&admin, &admin);
+        let _contract_id = env.register(SettlementPoolContract, (&admin, &admin));
     }
 
     #[test]
@@ -633,8 +618,6 @@ mod test {
     fn test_deposit_amount_too_large_rejected() {
         setup_pool!(env, client, admin, settlement_contract);
         let member = Address::generate(&env);
-
-        client.init_pool(&admin, &settlement_contract);
         client.deposit(&member, &(MAX_AMOUNT_STROOPS + 1));
     }
 
@@ -642,6 +625,9 @@ mod test {
     #[should_panic]
     fn test_deposit_requires_init() {
         setup_pool!(env, client, _admin, _settlement_contract);
+        env.as_contract(&client.address, || {
+            env.storage().instance().remove(&PoolDataKey::Config);
+        });
 
         let member = Address::generate(&env);
         client.deposit(&member, &1_i128);

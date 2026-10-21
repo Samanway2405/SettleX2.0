@@ -274,12 +274,43 @@ This section maps the required submission checklist to concrete proof in this re
 
 ### Contract Functions
 
-| Function                                                              | Type  | Purpose                                                 |
-| --------------------------------------------------------------------- | ----- | ------------------------------------------------------- |
-| `record_payment(trip_id, expense_id, payer, member, amount, tx_hash)` | Write | Stores payment record on-chain after XLM transfer       |
-| `get_payments(trip_id, offset, limit)`                                | Read  | Returns a bounded page of payment history               |
-| `is_paid(expense_id, member)`                                         | Read  | Checks if a member has already settled a specific share |
-| `extend_trip(trip_id, payment_offset, expense_offset, limit)`         | Write | Permissionlessly renews TTLs for bounded history pages  |
+#### Settlement Contract (`SettleXContract`)
+
+| Function | Type | Authorization | Purpose |
+| --- | --- | --- | --- |
+| `__constructor(admin)` | Constructor | Admin | Initializes contract admin and schema version at deployment |
+| `init(admin, pool_contract)` | Write | Admin | Legacy initialization entrypoint |
+| `upgrade(new_wasm_hash)` | Write | Admin | Atomically upgrades contract code to a new WASM hash |
+| `migrate(from_version)` | Write | Admin | Migrates contract state between schema versions |
+| `set_pool_contract(new_pool_contract)` | Write | Admin | Updates the linked settlement pool contract address |
+| `get_pool_contract()` | Read | None | Returns the current linked pool contract address |
+| `set_attestor(attestor)` | Write | Admin | Sets required co-signing attestor address; emits `AttestorEventV1` |
+| `clear_attestor()` | Write | Admin | Clears attestor, reverting records to self-attested |
+| `get_attestor()` | Read | None | Returns current attestor (if any) and bumps instance TTL |
+| `clear_paid(expense_id, member)` | Write | Admin | Emergency escape hatch: clears `ExpensePaid` flag to unblock a griefed expense |
+| `record_payment(trip_id, expense_id, payer, member, amount, tx_hash)` | Write | Member (+ Attestor if set) | Stores on-chain payment receipt with 32-byte transaction hash (`BytesN<32>`) |
+| `get_payment(trip_id, expense_id, member)` | Read | None | Fetches payment record for specific member |
+| `get_payments(trip_id, offset, limit)` | Read | None | Returns a bounded page of payment history |
+| `is_paid(expense_id, member)` | Read | None | Checks if a member has already settled a specific share |
+| `extend_trip(trip_id, payment_offset, expense_offset, limit)` | Write | None (Permissionless) | Renews storage TTLs for bounded history pages |
+| `get_version()` | Read | None | Returns current contract schema version |
+| `get_admin()` | Read | None | Returns current contract admin address |
+
+#### Pool Contract (`SettlementPoolContract`)
+
+| Function | Type | Authorization | Purpose |
+| --- | --- | --- | --- |
+| `__constructor(admin, settlement_contract)` | Constructor | Admin | Initializes pool admin and linked settlement contract |
+| `init_pool(admin, settlement_contract)` | Write | Admin | Legacy pool initialization entrypoint |
+| `upgrade(new_wasm_hash)` | Write | Admin | Atomically upgrades pool contract code |
+| `migrate(from_version)` | Write | Admin | Migrates pool storage between versions |
+| `set_settlement_contract(new_settlement_contract)` | Write | Admin | Updates authorized settlement contract address |
+| `get_settlement_contract()` | Read | None | Returns authorized settlement contract address |
+| `deposit(member, amount)` | Write | Admin | Admin-managed pool credit deposit for a member |
+| `withdraw(member, amount)` | Write | Settlement Contract & Member | Withdraws pool credits during payment settlement |
+| `get_balance(member)` | Read | None | Returns member's current pool credit balance |
+| `get_version()` | Read | None | Returns current pool schema version |
+| `get_admin()` | Read | None | Returns pool admin address |
 
 `get_payments` and `is_paid` are pure simulated reads; they do not renew
 storage TTLs. To keep history live, submit `extend_trip` as a real transaction
@@ -288,13 +319,40 @@ payment and expense offsets until both are `None`. If an entry has already
 expired, include the archived footprint in the transaction so Soroban can
 restore it, or restore the trip's data before calling `extend_trip`.
 
-**Error codes handled by the frontend:**
+### Contract Error Codes
 
-| Code | Name            | Meaning                                  |
-| ---- | --------------- | ---------------------------------------- |
-| #1   | `InvalidAmount` | Payment amount is zero or negative       |
-| #2   | `AlreadyPaid`   | This share was already settled on-chain  |
-| #3   | `EmptyId`       | Trip ID or expense ID is an empty string |
+#### Settlement Contract Errors
+
+| Code | Name | Meaning |
+| ---- | ---- | ------- |
+| #1 | `InvalidAmount` | Payment amount is zero or negative |
+| #2 | `AlreadyPaid` | Share is already settled on-chain |
+| #3 | `EmptyId` | Trip ID or expense ID is empty |
+| #4 | `AlreadyInitialized` | Contract has already been initialized |
+| #5 | `NotInitialized` | Contract has not been initialized yet |
+| #6 | `InvalidActor` | Invalid caller / address (e.g. payer equals member, or admin equals pool) |
+| #7 | `IdTooLong` | Trip ID or expense ID exceeds maximum allowed length (64 bytes) |
+| #8 | `AmountTooLarge` | Payment amount exceeds `MAX_AMOUNT_STROOPS` (1e15 stroops / 1e8 XLM) |
+| #9 | `VersionMismatch` | State version mismatch during migration |
+| #10 | `TxHashTooLong` | Transaction hash validation error |
+| #11 | `NotPaid` | Attempted to clear an expense payment that was not marked as paid |
+| #12 | `Unauthorized` | Caller lacks authorization (e.g. non-admin or missing attestor signature) |
+| #13 | `InvalidPage` | Bounded pagination parameters are invalid (e.g. limit is 0) |
+| #14 | `IndexOverflow` | Bounded trip index exceeded maximum capacity |
+
+#### Pool Contract Errors
+
+| Code | Name | Meaning |
+| ---- | ---- | ------- |
+| #101 | `AlreadyInitialized` | Pool has already been initialized |
+| #102 | `NotInitialized` | Pool has not been initialized yet |
+| #103 | `Unauthorized` | Caller is not authorized for pool operation |
+| #104 | `InvalidAmount` | Deposit or withdrawal amount is zero or negative |
+| #105 | `InsufficientBalance` | Member has insufficient balance for withdrawal |
+| #106 | `BalanceOverflow` | Deposit would cause member balance to overflow |
+| #107 | `VersionMismatch` | Pool state version mismatch during migration |
+| #108 | `InvalidActor` | Invalid actor address specified |
+| #109 | `AmountTooLarge` | Deposit or withdrawal exceeds `MAX_AMOUNT_STROOPS` |
 
 ### Why a Smart Contract?
 
