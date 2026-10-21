@@ -20,6 +20,11 @@ const STATIC_ASSET_CSP = [
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  eslint: {
+    // Lint the full repository so root files such as middleware.ts are included.
+    dirs: ["."],
+  },
+
   // ── Images ────────────────────────────────────────────────────────────────
   images: {
     remotePatterns: [
