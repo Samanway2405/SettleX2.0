@@ -41,7 +41,7 @@ export function decodeContractError(raw: string): string {
         case PoolErrorCode.NotInitialized:
           return "Pool contract is not initialized yet.";
         case PoolErrorCode.Unauthorized:
-          return "Pool authorization failed.";
+          return "Pool authorization failed. An operator approval may be required.";
         case PoolErrorCode.InvalidAmount:
           return "Pool payment amount must be greater than zero.";
         case PoolErrorCode.InsufficientBalance:
@@ -161,8 +161,9 @@ export async function precheckPoolBalance(
     return { ok: false, requiredStroops, error: "Contract not configured." };
   }
 
-  // Pure ledger write model (Issue #131): recording payments is a pure ledger write
-  // to the SettleX contract and does not require pre-funded pool credits.
+  // The pool is a separate operator-managed accounting ledger. Payment receipt
+  // recording does not currently consume pool credits, so this compatibility
+  // precheck deliberately does not imply that a member can allocate credit.
   return { ok: true, requiredStroops, balanceStroops: requiredStroops };
 }
 

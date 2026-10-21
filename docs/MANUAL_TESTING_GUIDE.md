@@ -29,6 +29,11 @@ For **each** installed wallet (Freighter, xBull, Lobstr, Rabet):
 - [ ] **Reject** the signature → app shows "cancelled", no state change.
 - [ ] Pay the same share again → blocked as already settled.
 
+## 3a. Pool authorization regression (operator only)
+- [ ] On a pool schema v2 deployment, invoke `deposit(member, amount)` with only the member signature: it must fail and the member balance must remain unchanged.
+- [ ] Invoke the same allocation with the configured pool administrator: it succeeds and the member accounting balance increases by exactly `amount`.
+- [ ] Confirm operator material calls this an **accounting allocation**, never an XLM/USDC deposit. The pool does not transfer or custody assets in this release.
+
 ## 4. Cross-user sync (needs Supabase)
 - [ ] Open the same trip in a second browser/user; an expense or payment update appears in the other within about five seconds while the page is visible.
 - [ ] Hide the second browser tab, make a change, then return to it; it refreshes promptly without a manual reload.

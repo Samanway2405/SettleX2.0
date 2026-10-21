@@ -13,8 +13,8 @@ Date: 2026-03-29
 ## Contract and Deployment
 
 - [x] Settlement contract deployed to testnet
-- [x] Pool contract deployed to testnet
-- [x] Inter-contract call proof transaction recorded on testnet
+- [ ] Pool schema v2 deployed or a supported pool upgraded and migrated (v1 is vulnerable to SX-179)
+- [ ] Admin-only allocation test executed against the deployed pool; member-only allocation rejected
 - [x] `NEXT_PUBLIC_CONTRACT_ID` updated in `.env.local`
 - [x] Explorer links documented in README
 
@@ -28,7 +28,7 @@ Date: 2026-03-29
 
 - [x] README includes live demo link
 - [x] README includes contract IDs and transaction proofs
-- [x] README includes pool address proof
+- [ ] README updated with the v2 pool address after deployment; legacy v1 ID remains marked unsafe
 - [x] README includes deployment screenshot (`public/deployment.png`)
 - [x] README includes submission checklist evidence section
 - [x] Final docs package added under `docs/`

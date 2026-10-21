@@ -54,7 +54,10 @@ pub struct PoolBalanceEventV1 {
 const LEDGERS_PER_DAY: u32 = 17_280;
 const STORAGE_BUMP_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
 const STORAGE_BUMP_AMOUNT: u32 = LEDGERS_PER_DAY * 365;
-const CONTRACT_VERSION: u32 = 1;
+// v2 closes SX-179: credits are an operator-managed accounting allocation,
+// never a member-minted balance. Existing v1 instances must be upgraded and
+// migrated before they can be trusted for settlement authorization.
+const CONTRACT_VERSION: u32 = 2;
 const MIN_MIGRATABLE_VERSION: u32 = 1;
 const MAX_AMOUNT_STROOPS: i128 = 1_000_000_000_000_000;
 
@@ -226,9 +229,12 @@ impl SettlementPoolContract {
             panic_with_error!(&env, PoolError::AmountTooLarge);
         }
 
-        // Self-service deposit: member authorizes the deposit of credits.
-        let _cfg = Self::get_config(env.clone());
-        member.require_auth();
+        // This pool is an accounting ledger, not a token custody contract. A
+        // member signature must never create a credit: the operator that owns
+        // the ledger approves every allocation. Requiring only `member` here
+        // was SX-179 and allowed unlimited free credits.
+        let cfg = Self::get_config(env.clone());
+        cfg.admin.require_auth();
 
         let key = PoolDataKey::Balance(member.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0_i128);
@@ -565,6 +571,61 @@ mod test {
         setup_pool!(env, client, admin, settlement_contract);
 
         let member = Address::generate(&env);
+
+        client.deposit(&member, &1_500_000_i128);
+        assert_eq!(client.balance_of(&member), 1_500_000_i128);
+    }
+
+    /// SX-179 regression: a member may not create accounting credits with
+    /// their own signature. This deliberately does not use `mock_all_auths`,
+    /// because blanket authorization would hide the exact vulnerability.
+    #[test]
+    #[should_panic]
+    fn test_member_cannot_self_credit_without_admin_approval() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let settlement_contract = Address::generate(&env);
+        let member = Address::generate(&env);
+
+        env.mock_all_auths();
+        let contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract));
+        let client = SettlementPoolContractClient::new(&env, &contract_id);
+
+        env.set_auths(&[]);
+        env.mock_auths(&[MockAuth {
+            address: &member,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (member.clone(), 1_500_000_i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        client.deposit(&member, &1_500_000_i128);
+    }
+
+    #[test]
+    fn test_admin_can_allocate_credit_without_member_signature() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let settlement_contract = Address::generate(&env);
+        let member = Address::generate(&env);
+
+        env.mock_all_auths();
+        let contract_id = env.register(SettlementPoolContract, (&admin, &settlement_contract));
+        let client = SettlementPoolContractClient::new(&env, &contract_id);
+
+        env.set_auths(&[]);
+        env.mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deposit",
+                args: (member.clone(), 1_500_000_i128).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
 
         client.deposit(&member, &1_500_000_i128);
         assert_eq!(client.balance_of(&member), 1_500_000_i128);
