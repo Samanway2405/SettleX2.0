@@ -55,7 +55,8 @@ Recommended flow:
    Constructors atomically initialize both instances, and the script then
    submits the admin-authenticated cross-reference update.
 2. Record the printed contract IDs and transaction output.
-3. Execute one `record_payment` flow that triggers pool withdraw to prove inter-contract behavior.
+3. Before allocating any credit, confirm the deployed pool WASM and release record are schema version `2`. The previous v1 deployment allowed member self-crediting and is retired.
+4. Execute an administrator-authorized `deposit(member, amount)` and verify that the same call signed only by `member` fails. This pool is an accounting ledger; do not describe this operation as a token deposit.
 5. Update `NEXT_PUBLIC_CONTRACT_ID` with the printed settlement contract ID.
 6. Save all explorer links in README/docs.
 

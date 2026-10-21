@@ -19,7 +19,7 @@ describe("decodeContractError", () => {
     [ContractErrorCode.IndexOverflow, "Payment history index is full."],
     [PoolErrorCode.AlreadyInitialized, "Pool is already initialized."],
     [PoolErrorCode.NotInitialized, "Pool contract is not initialized yet."],
-    [PoolErrorCode.Unauthorized, "Pool authorization failed."],
+    [PoolErrorCode.Unauthorized, "Pool authorization failed. An operator approval may be required."],
     [PoolErrorCode.InvalidAmount, "Pool payment amount must be greater than zero."],
     [PoolErrorCode.InsufficientBalance, "Pool balance is insufficient for this transfer."],
     [PoolErrorCode.BalanceOverflow, "Pool balance overflowed."],

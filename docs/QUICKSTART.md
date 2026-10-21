@@ -34,6 +34,13 @@ npm run dev
 ```
 Open <http://localhost:3000>, connect your wallet, and create your first expense.
 
+### Pool deployments
+The optional pool contract in this repository is an **admin-managed accounting
+ledger**, not an XLM or USDC vault. Deploy pool schema v2 only. Members cannot
+fund or credit themselves; its administrator must explicitly allocate a credit.
+The historical testnet v1 pool listed in the README is unsafe and must not be
+reused.
+
 ## 5. Build for production
 ```bash
 npm run build && npm run start

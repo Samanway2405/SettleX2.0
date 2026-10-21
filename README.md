@@ -201,7 +201,7 @@ SettleX deploys a **Soroban smart contract** on Stellar Testnet as an immutable,
 | Contract Role | Contract ID | Explorer |
 | ------------- | ----------- | -------- |
 | Settlement contract | `CAXVH54JVEUCLDQQW45SMRFTCAAVUGVBT4SBVLAGYDQ2YMAPK6YL6ADI` | [View](https://stellar.expert/explorer/testnet/contract/CAXVH54JVEUCLDQQW45SMRFTCAAVUGVBT4SBVLAGYDQ2YMAPK6YL6ADI) |
-| Pool contract | `CB4P4EXLGS56IXVNU3PLJO2BHF5BEEPBBYJAHXEPZDSD2OISQIGO53JA` | [View](https://stellar.expert/explorer/testnet/contract/CB4P4EXLGS56IXVNU3PLJO2BHF5BEEPBBYJAHXEPZDSD2OISQIGO53JA) |
+| Pool contract (legacy v1 — do not use) | `CB4P4EXLGS56IXVNU3PLJO2BHF5BEEPBBYJAHXEPZDSD2OISQIGO53JA` | [View](https://stellar.expert/explorer/testnet/contract/CB4P4EXLGS56IXVNU3PLJO2BHF5BEEPBBYJAHXEPZDSD2OISQIGO53JA) |
 
 Network: Stellar Testnet  
 Language: Rust (`soroban-sdk` v22.0.11)
@@ -212,9 +212,9 @@ Language: Rust (`soroban-sdk` v22.0.11)
 - Pool deploy tx: [fa245da3ce0a478a9146cccdfa0b1b7f918985c0c138dec3f061f104e5b8f39e](https://stellar.expert/explorer/testnet/tx/fa245da3ce0a478a9146cccdfa0b1b7f918985c0c138dec3f061f104e5b8f39e)
 - Pool init tx (`pool_ini`): [a04a0a2f79e06448156b52ebd07060281cab5bee323889e92c584e0aaf50546d](https://stellar.expert/explorer/testnet/tx/a04a0a2f79e06448156b52ebd07060281cab5bee323889e92c584e0aaf50546d)
 - Settlement init tx (`stx_ini`): [f05c2f59f980a00e99f3f00d57e22b8b10fd0405064096273fd912c9b05a037e](https://stellar.expert/explorer/testnet/tx/f05c2f59f980a00e99f3f00d57e22b8b10fd0405064096273fd912c9b05a037e)
-- Inter-contract settlement proof tx (`record_payment` + internal pool `withdraw`): [04c679c7ab7ec960db505038b4c6ec1f367e5d3caae013696bf3111e493de967](https://stellar.expert/explorer/testnet/tx/04c679c7ab7ec960db505038b4c6ec1f367e5d3caae013696bf3111e493de967)
+- Historical pool interaction tx (legacy v1 only): [04c679c7ab7ec960db505038b4c6ec1f367e5d3caae013696bf3111e493de967](https://stellar.expert/explorer/testnet/tx/04c679c7ab7ec960db505038b4c6ec1f367e5d3caae013696bf3111e493de967)
 
-The final proof transaction above is verifiable evidence of the inter-contract path: settlement `record_payment` triggered pool `withdraw` in the same on-chain execution.
+The historical transaction above is not security evidence for the current code. It predates the SX-179 pool authorization fix; deploy pool schema v2 before using any pool allocation.
 
 New deployments must use [`scripts/deploy-contract.sh`](scripts/deploy-contract.sh).
 Both instances use Soroban constructors, so their admin state is initialized
@@ -226,12 +226,13 @@ constructor initialization and are retained only for compatibility with older
 instances.
 
 Security hardening note:
-- Pool credits are now admin-managed in the pool contract to prevent untrusted self-crediting.
-- Pool `withdraw` requires auth from **both** the configured settlement contract and the member. Credits can therefore only be consumed as part of a `record_payment` call — a member cannot drain their own credits directly, and no other contract can spend them. Rotating `set_settlement_contract` immediately revokes the previous contract's ability to withdraw.
+- **Pool credits are operator-managed accounting allocations, not tokens.** `deposit(member, amount)` requires the configured pool admin's authorization; a member's own signature cannot create, increase, or replenish a credit. This closes SX-179's unlimited self-crediting bug.
+- The pool does **not** custody XLM, USDC, or any other asset, and a pool balance is not proof of funds. Only an authorized operator may allocate credits. Do not present credits as deposits or use the pool as a value-transfer system.
+- `withdraw` still requires auth from **both** the configured settlement contract and the member, so no direct member or third-party contract withdrawal is authorized. It is separate from the Horizon payment and receipt-recording flows in this release.
 - Settlement records now carry an `attested` flag. With no attestor configured a record is **self-attested** — it proves only that a member wrote a string, and the contract verifies neither the `payer`, the `amount`, nor the `tx_hash` against Horizon. Treat the Stellar transaction on the explorer as the evidence, not the in-app record. `set_attestor` makes a verifier's co-signature mandatory and marks records `attested: true`; the verifier service itself is not yet built, so attestor-backed verification is not live in this repo.
 - `clear_paid` (admin-only) clears the `ExpensePaid` flag, so a bogus or mistaken record can no longer permanently block the legitimate one. It preserves the original entry in trip history.
 
-> **Redeploy required.** `PaymentRecord` gained a field and `CONTRACT_VERSION` is now `2`. Records written by a v1 deployment cannot be read by this build — deploy fresh contracts and update `NEXT_PUBLIC_CONTRACT_ID`.
+> **Redeploy required.** Pool `CONTRACT_VERSION` is now `2`; the deployed v1 pool is vulnerable and must not be used. Upgrade/migrate a supported instance or deploy a fresh v2 pool, then update operational records with its ID. `PaymentRecord` also gained a field in settlement schema v2.
 
 ---
 
@@ -305,12 +306,10 @@ This section maps the required submission checklist to concrete proof in this re
 | `upgrade(new_wasm_hash)` | Write | Admin | Atomically upgrades pool contract code |
 | `migrate(from_version)` | Write | Admin | Migrates pool storage between versions |
 | `set_settlement_contract(new_settlement_contract)` | Write | Admin | Updates authorized settlement contract address |
-| `get_settlement_contract()` | Read | None | Returns authorized settlement contract address |
-| `deposit(member, amount)` | Write | Admin | Admin-managed pool credit deposit for a member |
-| `withdraw(member, amount)` | Write | Settlement Contract & Member | Withdraws pool credits during payment settlement |
-| `get_balance(member)` | Read | None | Returns member's current pool credit balance |
-| `get_version()` | Read | None | Returns current pool schema version |
-| `get_admin()` | Read | None | Returns pool admin address |
+| `get_config()` | Read | None | Returns the pool admin and authorized settlement contract address |
+| `deposit(member, amount)` | Write | Pool Admin | Allocates an accounting credit; it does not transfer or custody tokens |
+| `withdraw(member, amount)` | Write | Settlement Contract & Member | Decrements an authorized accounting allocation; it does not transfer tokens |
+| `balance_of(member)` | Read | None | Returns an operator-approved accounting credit balance |
 
 `get_payments` and `is_paid` are pure simulated reads; they do not renew
 storage TTLs. To keep history live, submit `extend_trip` as a real transaction
@@ -349,7 +348,7 @@ restore it, or restore the trip's data before calling `extend_trip`.
 | #103 | `Unauthorized` | Caller is not authorized for pool operation |
 | #104 | `InvalidAmount` | Deposit or withdrawal amount is zero or negative |
 | #105 | `InsufficientBalance` | Member has insufficient balance for withdrawal |
-| #106 | `BalanceOverflow` | Deposit would cause member balance to overflow |
+| #106 | `BalanceOverflow` | Operator allocation would cause member balance to overflow |
 | #107 | `VersionMismatch` | Pool state version mismatch during migration |
 | #108 | `InvalidActor` | Invalid actor address specified |
 | #109 | `AmountTooLarge` | Deposit or withdrawal exceeds `MAX_AMOUNT_STROOPS` |

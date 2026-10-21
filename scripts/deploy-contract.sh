@@ -11,6 +11,9 @@
 #
 # The settlement constructor initializes its admin atomically. The pool
 # constructor then initializes the pool atomically with the settlement address.
+# The current pool is schema v2: its `deposit` entrypoint is an administrator
+# approved accounting allocation, not a token transfer or member self-service
+# funding operation.
 # The final set_pool_contract call wires the already-initialized contracts
 # together; it is admin-authenticated and cannot be front-run.
 

@@ -925,12 +925,9 @@ mod test {
         };
     }
 
-    /// End-to-end proof that the pool's settlement-contract check does not break
-    /// the legitimate path, verified WITHOUT `mock_all_auths()`.
-    ///
-    /// The member authorizes `record_payment`; the nested pool `withdraw` is
-    /// authorized for the settlement contract by the host, because a contract
-    /// making a sub-invocation authorizes itself from the invocation stack.
+    /// The pool is configured separately from payment recording. It is an
+    /// operator-managed accounting allocation, not proof that a Horizon
+    /// transfer occurred; `record_payment` remains a receipt-recording flow.
     // ── Escape hatch for the permanent paid-flag lock ────────────────────
 
     /// The griefing scenario: a bogus record for (expense_id, member) makes the
