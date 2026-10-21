@@ -41,7 +41,7 @@ export async function pollTransactionByHash(
   while (Date.now() - startTime < maxWaitMs) {
     try {
       if (typeof server?.transactions === "function" && typeof server.transactions().transaction === "function") {
-        const txRecord = await server.transactions().transaction(txHash);
+        const txRecord = await server.transactions().transaction(txHash).call();
         if (txRecord && txRecord.successful !== false) {
           return {
             hash: txRecord.hash || txHash,

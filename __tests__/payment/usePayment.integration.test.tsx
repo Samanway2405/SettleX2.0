@@ -10,8 +10,13 @@ const { act, renderHook, waitFor } = require("@testing-library/react");
 
 jest.mock("@/lib/stellar/buildTransaction");
 jest.mock("@/lib/stellar/submitTransaction");
-jest.mock("@/lib/stellar/contract");
-jest.mock("@/lib/freighter");
+jest.mock("@/lib/stellar/contract", () => ({
+  checkIsPaid: jest.fn(),
+  recordPaymentOnChain: jest.fn(),
+}));
+jest.mock("@/lib/freighter", () => ({
+  signXDR: jest.fn(),
+}));
 jest.mock("@/hooks/useWallet", () => ({
   useWallet: jest.fn(),
 }));
@@ -101,6 +106,25 @@ describe("usePayment integration flow", () => {
     expect(mockMarkSharePaid).toHaveBeenCalledWith("exp-1", "member-1", "tx-hash-123");
     expect(recordPaymentOnChain).toHaveBeenCalledTimes(1);
     expect(mockToastSuccess).toHaveBeenCalled();
+  });
+
+  it("does not mark a share paid when transaction submission times out unconfirmed", async () => {
+    jest.mocked(submitSignedTransaction).mockRejectedValue(
+      new Error("Transaction submission timed out."),
+    );
+    const { result } = renderHook(() => usePayment({ expenseId: "exp-timeout" }));
+
+    await act(async () => {
+      await result.current.payShare({
+        share,
+        expenseTitle: "Dinner",
+        payerWalletAddress: "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      });
+    });
+
+    expect(result.current.paymentState.status).toBe("error");
+    expect(mockMarkSharePaid).not.toHaveBeenCalled();
+    expect(recordPaymentOnChain).not.toHaveBeenCalled();
   });
 
   it("does not build or submit a payment when the wallet network mismatches", async () => {

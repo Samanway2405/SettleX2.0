@@ -6,7 +6,9 @@ jest.mock("@/lib/stellar/client", () => ({
   server: {
     submitTransaction: (...args: unknown[]) => submitTransactionMock(...args),
     transactions: () => ({
-      transaction: (...args: unknown[]) => transactionLookupMock(...args),
+      transaction: (...args: unknown[]) => ({
+        call: () => transactionLookupMock(...args),
+      }),
     }),
   },
 }));
@@ -133,5 +135,6 @@ describe("submitSignedTransaction", () => {
         pollIntervalMs: 10,
       })
     ).rejects.toThrow(/Transaction submission timed out/);
+    expect(transactionLookupMock).toHaveBeenCalled();
   });
 });
