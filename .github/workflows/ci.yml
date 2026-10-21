@@ -129,19 +129,26 @@ jobs:
         run: cargo test
 
       - name: Build contract for WASM
-        run: stellar contract build --manifest-path contract/Cargo.toml
+        run: |
+          stellar contract build --manifest-path contract/Cargo.toml --package settlex-contract
+          stellar contract build --manifest-path contract/Cargo.toml --package settlement-pool-contract
 
       - name: Check WASM size
         run: |
-          WASM_FILE=$(find contract/target -name "*.wasm" | head -n 1)
-          if [ -z "$WASM_FILE" ]; then
-            echo "Error: WASM file not found!"
-            exit 1
-          fi
-          SIZE=$(stat -c%s "$WASM_FILE")
-          MAX_SIZE=131072
-          echo "WASM size: $SIZE bytes"
-          if [ "$SIZE" -gt "$MAX_SIZE" ]; then
-            echo "Error: WASM size exceeds the deployment size limit of $MAX_SIZE bytes."
-            exit 1
-          fi
+          WASM_FILES=(
+            contract/target/wasm32v1-none/release/settlex_contract.wasm
+            contract/target/wasm32v1-none/release/settlement_pool_contract.wasm
+          )
+          for WASM_FILE in "${WASM_FILES[@]}"; do
+            if [ ! -f "$WASM_FILE" ]; then
+              echo "Error: WASM file not found: $WASM_FILE"
+              exit 1
+            fi
+            SIZE=$(stat -c%s "$WASM_FILE")
+            MAX_SIZE=131072
+            echo "$WASM_FILE size: $SIZE bytes"
+            if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+              echo "Error: $WASM_FILE exceeds the deployment size limit of $MAX_SIZE bytes."
+              exit 1
+            fi
+          done

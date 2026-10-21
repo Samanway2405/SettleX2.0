@@ -1022,7 +1022,15 @@ dependencies = [
 name = "settlex-contract"
 version = "0.2.0"
 dependencies = [
+	"settlement-pool-contract",
  "soroban-sdk",
+]
+
+[[package]]
+name = "settlement-pool-contract"
+version = "0.1.0"
+dependencies = [
+	"soroban-sdk",
 ]
 
 [[package]]
