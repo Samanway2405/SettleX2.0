@@ -55,8 +55,10 @@ export enum ContractErrorCode {
 }
 
 export enum PoolErrorCode {
+  /** Pool schema v2 treats balances as operator-approved accounting credits. */
   AlreadyInitialized = 101,
   NotInitialized = 102,
+  /** A member cannot allocate their own credit; the configured admin must authorize it. */
   Unauthorized = 103,
   InvalidAmount = 104,
   InsufficientBalance = 105,

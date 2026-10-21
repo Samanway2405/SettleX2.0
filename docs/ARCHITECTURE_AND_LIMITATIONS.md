@@ -10,9 +10,11 @@ SettleX uses:
   expense/trip sync uses polling
 - Stellar payment operations for value transfer
 - Soroban settlement contract for immutable payment recording
-- Separate pool contract for inter-contract withdraw flow. `withdraw`
-  requires authorization from both the configured settlement contract and
-  the member, so pool credits can only be spent through `record_payment`.
+- Separate pool contract for operator-managed accounting allocations.
+  `deposit` requires the configured pool admin; a member can never mint their
+  own balance. `withdraw` requires both the configured settlement contract and
+  the member. These credits are not token custody and are separate from the
+  Horizon payment receipt flow.
 
 ## Key Assumptions
 
@@ -103,7 +105,7 @@ SettleX uses:
   member to rewrite every column in the row. Schema version checks and RLS/
   trigger breach tests are therefore required before production use.
 - Some screenshots in README are desktop captures; mobile screenshots should be added for evaluator clarity.
-- Pool balances are internal contract accounting credits, not native XLM/token custody transfers on-chain.
+- Pool balances are operator-approved internal accounting credits, not native XLM/token custody transfers on-chain. Since pool schema v2, a member cannot self-credit: every allocation requires pool-admin authorization.
 - `record_payment` stores the provided `payer`, `amount` and `tx_hash` without
   verifying any of them against Horizon. With no attestor configured the record
   is **self-attested** — it proves a member wrote a string, nothing more — and
@@ -139,7 +141,7 @@ SettleX uses:
 - Add automated e2e tests (Playwright) with mobile viewport assertions.
 - Add a script to validate README proof links are live.
 - Add an automated checklist CI job that verifies required docs/sections exist.
-- Introduce token/native-asset backed pool settlement model (transfer in/out) for stronger economic guarantees.
+- Replace the accounting pool with a token/native-asset backed settlement model (transfer in/out) for economic guarantees; do not treat operator allocations as a substitute for custody.
 - Build and deploy the off-chain verifier service that checks Horizon before
   co-signing, then point `set_attestor` at it. The contract-side hook already
   exists; only the service is missing.

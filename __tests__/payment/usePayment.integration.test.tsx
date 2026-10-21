@@ -2,7 +2,7 @@
 
 import { buildPaymentTransaction } from "@/lib/stellar/buildTransaction";
 import { submitSignedTransaction } from "@/lib/stellar/submitTransaction";
-import { checkIsPaid, precheckPoolBalance, recordPaymentOnChain } from "@/lib/stellar/contract";
+import { checkIsPaid, recordPaymentOnChain } from "@/lib/stellar/contract";
 import { signXDR } from "@/lib/freighter";
 import type { SplitShare } from "@/types/expense";
 
@@ -79,11 +79,6 @@ describe("usePayment integration flow", () => {
       successful: true,
     });
     jest.mocked(checkIsPaid).mockResolvedValue({ paid: false, success: true });
-    jest.mocked(precheckPoolBalance).mockResolvedValue({
-      ok: true,
-      requiredStroops: 15000000n,
-      balanceStroops: 15000000n,
-    });
     jest.mocked(recordPaymentOnChain).mockResolvedValue({ success: true, ledger: 322 });
   });
 
