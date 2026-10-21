@@ -27,7 +27,7 @@ jest.mock("@/lib/supabase/session", () => ({
   getAuthenticatedClient: jest.fn(),
   requireAuthenticatedClient: jest.fn(),
   clearWalletSession: jest.fn(),
-  readStoredSession: jest.fn(() => null),
+  hasProvenSession: jest.fn(() => false),
   onSessionChange: jest.fn(() => () => {}),
 }));
 
@@ -38,7 +38,7 @@ jest.mock("@/context/WalletContext", () => ({
   useWalletContext: () => ({ publicKey: mockPublicKey, reconcile: mockReconcile }),
 }));
 
-const { getAuthenticatedClient, readStoredSession } = require("@/lib/supabase/session");
+const { getAuthenticatedClient, hasProvenSession } = require("@/lib/supabase/session");
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockPublicKey = null;
   // No wallet has signed a challenge unless a test says so.
-  readStoredSession.mockReturnValue(null);
+  hasProvenSession.mockReturnValue(false);
   // Never resolve a client — this is the pre-signature window under test.
   getAuthenticatedClient.mockImplementation(() => new Promise(() => {}));
 });
@@ -148,11 +148,7 @@ describe("offline cache isolation", () => {
       getWalletScopedKey(LS_EXPENSES, WALLET_A),
       JSON.stringify([SECRET_EXPENSE])
     );
-    readStoredSession.mockImplementation((wallet: string) =>
-      wallet === WALLET_A
-        ? { walletAddress: WALLET_A, accessToken: "t", expiresAt: Date.now() + 60_000 }
-        : null
-    );
+    hasProvenSession.mockImplementation((wallet: string) => wallet === WALLET_A);
 
     mockPublicKey = WALLET_A;
     render(
@@ -170,11 +166,7 @@ describe("offline cache isolation", () => {
 
   it("ignores a legacy unscoped cache entirely", async () => {
     localStorage.setItem(LS_EXPENSES, JSON.stringify([SECRET_EXPENSE]));
-    readStoredSession.mockReturnValue({
-      walletAddress: WALLET_B,
-      accessToken: "t",
-      expiresAt: Date.now() + 60_000,
-    });
+    hasProvenSession.mockReturnValue(true);
 
     mockPublicKey = WALLET_B;
     render(

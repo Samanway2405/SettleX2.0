@@ -53,7 +53,7 @@
 
 SettleX solves a fundamental problem with group expense sharing: apps like Splitwise only track IOUs — you still have to chase people for real money. SettleX closes the loop by connecting split calculations directly to on-chain payments.
 
-Every payment produces a **real, verifiable transaction hash** on the Stellar blockchain — that hash, checkable on any explorer, is the evidence a payment happened. An on-chain Soroban smart contract additionally records each settlement so participants share one append-only history. Those records are currently *self-attested*: the contract stores what the member submits without checking it against Horizon, so treat the Stellar transaction as the proof and the contract record as bookkeeping (see [Architecture and Limitations](docs/ARCHITECTURE_AND_LIMITATIONS.md)). The app syncs across all participants in real time — when someone pays, everyone sees it immediately.
+Every payment produces a **real, verifiable transaction hash** on the Stellar blockchain — that hash, checkable on any explorer, is the evidence a payment happened. An on-chain Soroban smart contract additionally records each settlement so participants share one append-only history. Those records are currently *self-attested*: the contract stores what the member submits without checking it against Horizon, so treat the Stellar transaction as the proof and the contract record as bookkeeping (see [Architecture and Limitations](docs/ARCHITECTURE_AND_LIMITATIONS.md)). The app refreshes shared expenses and trips about every five seconds while a page is visible.
 
 **Core design principles:**
 
@@ -393,7 +393,7 @@ npm install
 
 ### 3. Create a Supabase project
 
-SettleX uses Supabase for real-time cross-user sync. Without it, data only persists locally in the current browser session.
+SettleX uses Supabase for cross-user sync, refreshed about every five seconds while a page is visible. Without it, data only persists locally in the current browser session.
 
 1. Create a free project at [supabase.com](https://supabase.com).
 2. In the SQL Editor, run the full schema from [`supabase-setup.sql`](supabase-setup.sql) (or follow [docs/SUPABASE_SETUP.md](docs/SUPABASE_SETUP.md) for a walkthrough).

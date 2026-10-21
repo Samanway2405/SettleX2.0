@@ -411,7 +411,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // ── Refresh session: re-run the wallet signing handshake ──────────────────
 
   const refreshSession = useCallback(async () => {
-    clearWalletSession();
+    await clearWalletSession();
     setVerifiedWallet(null);
     setSessionError(null);
     setIsLoading(true);

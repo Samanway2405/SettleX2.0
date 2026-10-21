@@ -11,14 +11,11 @@ import type { Trip } from "@/types/trip";
 import { getWalletScopedKey, LS_TRIPS } from "@/lib/utils/constants";
 import {
   getAuthenticatedClient,
+  hasProvenSession,
   onSessionChange,
-  readStoredSession,
   requireAuthenticatedClient,
 } from "@/lib/supabase/session";
-import type {
-  RealtimePostgresChangesPayload,
-  SupabaseClient,
-} from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/types/supabase";
 import { useWalletContext } from "./WalletContext";
 import { parseTripRow } from "@/lib/supabase/rowGuards";
@@ -27,19 +24,18 @@ import { supabaseErrorFields } from "@/lib/observability/supabaseError";
 
 
 /**
- * True only when this browser holds an unexpired session token minted for this
- * exact wallet — i.e. the wallet has signed a server challenge at some point.
+ * True only after the server has confirmed an active session for this wallet.
  *
  * The offline cache is readable by anyone at this keyboard, so possession of an
  * address alone must not unlock it: otherwise a wallet that connects and never
  * signs (or declines to) would be shown the rows of whichever account cached
- * them. Proof of ownership gates the read; the token still authorizes nothing
- * on its own, because the server re-verifies it on every request.
+ * them. The cookie itself is never read by browser code; the server verifies it
+ * before this in-memory marker is set.
  */
 function hasProvenOwnership(walletAddress: string | null): boolean {
   if (!walletAddress) return false;
   try {
-    return !!readStoredSession(walletAddress);
+    return hasProvenSession(walletAddress);
   } catch {
     return false;
   }
@@ -142,7 +138,7 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Resolve the authenticated client once per wallet so the initial load and
-  // the realtime feed share it. Concurrent callers reuse a single handshake,
+  // periodic refresh share it. Concurrent callers reuse a single handshake,
   // so the wallet is only ever asked to sign once.
   useEffect(() => {
     let cancelled = false;
@@ -239,90 +235,60 @@ export function TripProvider({ children }: { children: React.ReactNode }) {
   }, [client, publicKey, consentGeneration]);
 
 
-  // Realtime authorizes on the socket's own JWT, so the feed has to run on the
-  // authenticated client too — the anon client would receive nothing.
+  // The JWT stays in an HttpOnly cookie, so database changes are polled through
+  // the authenticated REST proxy rather than exposed to a Realtime socket.
   useEffect(() => {
     if (!client || !publicKey) return;
 
     const cacheKey = getWalletScopedKey(LS_TRIPS, publicKey);
+    let stopped = false;
+    let inFlight = false;
+    let failureReported = false;
 
-    const channel = client
-      .channel("trips-changes")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "trips" },
-        (
-          payload: RealtimePostgresChangesPayload<
-            Database["public"]["Tables"]["trips"]["Row"]
-          >
-        ) => {
-          const row = payload.new;
-          if (!row) return;
-          if (!isRowForWallet(row, publicKey)) {
-            setTrips((prev) => {
-              const updated = prev.filter((trip) => trip.id !== row.id);
-              localStorage.setItem(cacheKey, JSON.stringify(updated));
-              return updated;
-            });
-            return;
-          }
-          const newTrip = dbRowToTrip(row);
-          setTrips((prev) => {
-            if (prev.some((t) => t.id === newTrip.id)) return prev;
-            const updated = [newTrip, ...prev];
-            localStorage.setItem(cacheKey, JSON.stringify(updated));
-            return updated;
+    const refresh = async () => {
+      if (
+        stopped ||
+        inFlight ||
+        document.visibilityState !== "visible" ||
+        !hasProvenSession(publicKey)
+      ) return;
+      inFlight = true;
+      try {
+        const { data, error } = await client
+          .from("trips")
+          .select("*")
+          .order("created_at", { ascending: false });
+        if (error) throw error;
+        if (stopped || !data) return;
+
+        const trips = data
+          .filter((row) => isRowForWallet(row, publicKey))
+          .map(dbRowToTrip);
+        setTrips(trips);
+        localStorage.setItem(cacheKey, JSON.stringify(trips));
+        failureReported = false;
+      } catch (error) {
+        if (!stopped && !failureReported) {
+          reportError("trip.poll_failed", error, {
+            fields: supabaseErrorFields(error),
           });
+          failureReported = true;
         }
-      )
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "trips" },
-        (
-          payload: RealtimePostgresChangesPayload<
-            Database["public"]["Tables"]["trips"]["Row"]
-          >
-        ) => {
-          const row = payload.new;
-          if (!row || !isRowForWallet(row, publicKey)) return;
-          const updatedTrip = dbRowToTrip(row);
-          setTrips((prev) => {
-            const updated = prev.map((t) =>
-              t.id === updatedTrip.id ? updatedTrip : t
-            );
-            localStorage.setItem(cacheKey, JSON.stringify(updated));
-            return updated;
-          });
-        }
-      )
-      .on(
-        "postgres_changes",
-        { event: "DELETE", schema: "public", table: "trips" },
-        (
-          payload: RealtimePostgresChangesPayload<
-            Database["public"]["Tables"]["trips"]["Row"]
-          >
-        ) => {
-          // `old` is typed `{}` for INSERT events; a DELETE carries the row.
-          const row = payload.old as Partial<Database["public"]["Tables"]["trips"]["Row"]> | undefined;
-          if (!row || !isRowForWallet(row, publicKey)) return;
-          const deletedId = row?.id;
-          if (!deletedId) return;
-          setTrips((prev) => {
-            const updated = prev.filter((t) => t.id !== deletedId);
-            localStorage.setItem(cacheKey, JSON.stringify(updated));
-            return updated;
-          });
-        }
-      )
-      .subscribe((status, err) => {
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-          reportError("trip.realtime_failed", err, { fields: { status } });
-        }
-      });
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const interval = setInterval(() => void refresh(), 5000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      void client.removeChannel(channel);
+      stopped = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [client, publicKey]);
 

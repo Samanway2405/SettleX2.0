@@ -1,11 +1,9 @@
 /**
  * Wallet-authenticated Supabase sessions.
  *
- * A Supabase client is only trusted with a wallet identity after the wallet has
- * signed a server-issued challenge (`/api/auth/challenge` → `/api/auth/verify`)
- * and the server has minted a JWT carrying a `wallet_address` claim. RLS
- * policies read that claim, so an access token cannot be forged client-side the
- * way the old `x-wallet-address` request header could.
+ * The access token is issued only to an HttpOnly cookie. Browser database
+ * requests use the same-origin Next.js proxy, which reads and validates that
+ * cookie before forwarding the request to Supabase.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/types/supabase";
@@ -16,7 +14,6 @@ import {
   SESSION_REFRESH_SKEW_SECONDS,
   SIGNOUT_ENDPOINT,
   VERIFY_ENDPOINT,
-  WALLET_CLAIM,
 } from "@/lib/auth/constants";
 import { signXDR } from "@/lib/freighter";
 
@@ -25,7 +22,6 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
 export interface WalletSession {
   walletAddress: string;
-  accessToken: string;
   /** Expiry in milliseconds since the epoch. */
   expiresAt: number;
 }
@@ -33,83 +29,17 @@ export interface WalletSession {
 /** Raised when the handshake could not complete (rejected signature, etc.). */
 export class WalletSessionError extends Error {}
 
-// ─── Token claims ─────────────────────────────────────────────────────────────
-
-/**
- * The parts of the token this client trusts. They come from the JWT payload
- * itself, never from the JSON fields stored beside it.
- */
-interface TokenClaims {
-  walletAddress: string;
-  /** Expiry in milliseconds since the epoch. */
-  expiresAt: number;
-}
-
-/**
- * Decodes a JWT payload without verifying the signature.
- *
- * The signature cannot be checked here — the secret is server-side, which is
- * the whole point. That is fine: this is not an authorization decision. The
- * server re-verifies the token on every request and RLS authorizes on the real
- * claim, so a forged token gets the browser nothing. What reading the claims
- * *does* buy is that the UI shows the identity the token actually carries,
- * instead of a sibling JSON field an attacker could set to any address.
- */
-function decodeTokenClaims(accessToken: string): TokenClaims | null {
-  try {
-    const parts = accessToken.split(".");
-    if (parts.length !== 3) return null;
-
-    const padded = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const json = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
-    const claims: unknown = JSON.parse(json);
-    if (!claims || typeof claims !== "object") return null;
-
-    const record = claims as Record<string, unknown>;
-    const walletAddress = record[WALLET_CLAIM];
-    const exp = record.exp;
-    if (typeof walletAddress !== "string" || !walletAddress) return null;
-    if (typeof exp !== "number") return null;
-
-    return { walletAddress, expiresAt: exp * 1000 };
-  } catch {
-    return null;
-  }
-}
-
-// ─── Cached session ───────────────────────────────────────────────────────────
-
-/**
- * Freshness measured against the token's own `exp`, so editing the stored
- * `expiresAt` cannot make a dead token look alive.
- *
- * A token is considered fresh until its actual expiry time (`claims.expiresAt`).
- * Previously this subtracted `SESSION_REFRESH_SKEW_SECONDS`, which prematurely
- * dropped valid sessions 5 minutes early.
- */
 export function isFresh(session: WalletSession, now = Date.now()): boolean {
-  const claims = decodeTokenClaims(session.accessToken);
-  if (!claims) return false;
-  return claims.expiresAt > now;
+  return Number.isFinite(session.expiresAt) && session.expiresAt > now;
 }
 
-/**
- * Returns true if the session is alive but inside the warning window before
- * expiry (`SESSION_REFRESH_SKEW_SECONDS`), so the UI can prompt the user to re-sign.
- */
 export function isSessionExpiringSoon(session: WalletSession, now = Date.now()): boolean {
-  const claims = decodeTokenClaims(session.accessToken);
-  if (!claims) return false;
-  return claims.expiresAt > now && claims.expiresAt - SESSION_REFRESH_SKEW_SECONDS * 1000 <= now;
+  return isFresh(session, now) &&
+    session.expiresAt - SESSION_REFRESH_SKEW_SECONDS * 1000 <= now;
 }
 
-/**
- * Returns true if the token is past its expiration time.
- */
 export function isSessionExpired(session: WalletSession, now = Date.now()): boolean {
-  const claims = decodeTokenClaims(session.accessToken);
-  if (!claims) return true;
-  return claims.expiresAt <= now;
+  return !Number.isFinite(session.expiresAt) || session.expiresAt <= now;
 }
 
 export interface SessionExpiryInfo {
@@ -119,184 +49,109 @@ export interface SessionExpiryInfo {
   isExpired: boolean;
 }
 
-/**
- * Returns expiry information for the active or stored session for `walletAddress`.
- */
 export function getSessionExpiryInfo(
   walletAddress: string,
   now = Date.now(),
 ): SessionExpiryInfo | null {
-  if (typeof window === "undefined" || !walletAddress) return null;
-  const session = memoizedSession ?? readAnyStoredSession();
-  if (!session?.accessToken) return null;
-  const claims = decodeTokenClaims(session.accessToken);
-  if (!claims || claims.walletAddress !== walletAddress) return null;
+  const session = memoizedSession;
+  if (!session || session.walletAddress !== walletAddress) return null;
 
-  const secondsRemaining = Math.max(0, Math.floor((claims.expiresAt - now) / 1000));
-  const expired = claims.expiresAt <= now;
-  const expiringSoon = !expired && claims.expiresAt - SESSION_REFRESH_SKEW_SECONDS * 1000 <= now;
-
+  const secondsRemaining = Math.max(0, Math.floor((session.expiresAt - now) / 1000));
+  const expired = session.expiresAt <= now;
   return {
-    expiresAt: claims.expiresAt,
+    expiresAt: session.expiresAt,
     secondsRemaining,
-    isExpiringSoon: expiringSoon,
+    isExpiringSoon: !expired &&
+      session.expiresAt - SESSION_REFRESH_SKEW_SECONDS * 1000 <= now,
     isExpired: expired,
   };
 }
 
-/**
- * Returns the stored session only if the token itself proves it belongs to
- * `walletAddress` and has not expired.
- *
- * The stored `walletAddress`/`expiresAt` fields are a cache hint and nothing
- * more: pairing a victim's address with an attacker's valid token used to make
- * the UI mark the victim's wallet as verified, because these checks read the
- * JSON beside the token rather than the claims inside it.
- */
-export function readStoredSession(walletAddress: string): WalletSession | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(LS_SESSION);
-    if (!raw) return null;
-    const stored = JSON.parse(raw) as WalletSession;
-    if (!stored?.accessToken || typeof stored.accessToken !== "string") return null;
-
-    const claims = decodeTokenClaims(stored.accessToken);
-    if (!claims) return null;
-    if (claims.walletAddress !== walletAddress) return null;
-
-    // Rebuild from the claims so nothing downstream can read a forged field.
-    const session: WalletSession = {
-      walletAddress: claims.walletAddress,
-      accessToken: stored.accessToken,
-      expiresAt: claims.expiresAt,
-    };
-    if (!isFresh(session)) return null;
-    return session;
-  } catch {
-    return null;
-  }
+export function hasProvenSession(walletAddress: string): boolean {
+  return !!memoizedSession &&
+    memoizedSession.walletAddress === walletAddress &&
+    isFresh(memoizedSession);
 }
 
-/**
- * Reads the stored session without checking which wallet it belongs to. Only
- * for sign-out, where the point is to revoke whatever token this browser holds.
- */
-function readAnyStoredSession(): WalletSession | null {
-  if (typeof window === "undefined") return null;
+async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  let finishDeadline!: () => void;
+  const deadline = new Promise<"timeout">((resolve) => {
+    finishDeadline = () => resolve("timeout");
+  });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    finishDeadline();
+  }, AUTH_REQUEST_TIMEOUT_MS);
   try {
-    const raw = window.localStorage.getItem(LS_SESSION);
-    if (!raw) return null;
-    const session = JSON.parse(raw) as WalletSession;
-    return session?.accessToken ? session : null;
-  } catch {
-    return null;
-  }
-}
-
-function storeSession(session: WalletSession): void {
-  try {
-    window.localStorage.setItem(LS_SESSION, JSON.stringify(session));
-  } catch {
-    // Private-mode browsers refuse writes — the in-memory copy still works.
-  }
-}
-
-/**
- * Tells the server to revoke the current token, so it stops working everywhere
- * rather than only in this browser.
- *
- * The local session is cleared by the caller regardless of the outcome, because
- * a user who clicked "sign out" must never be left holding a live session just
- * because the network failed. The resolved boolean lets the caller surface a
- * warning toast when the server explicitly refused — "clear locally, tell the
- * user" are not mutually exclusive.
- */
-async function revokeOnServer(
-  session: WalletSession,
-  everywhere: boolean,
-): Promise<{ ok: boolean }> {
-  try {
-    const body = JSON.stringify({ everywhere });
-    const response = await fetch(SIGNOUT_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.accessToken}`,
-      },
-      body,
-      keepalive: true,
-    });
-    return { ok: response.ok };
-  } catch {
-    // Network failure: the short TTL is the backstop. Treat as non-fatal.
-    return { ok: false };
-  }
-}
-
-/**
- * Drops the cached token and revokes it server-side, so the next authenticated
- * call re-runs the handshake and the old token is dead rather than merely
- * forgotten.
- *
- * Always clears locally — the user must never be left holding a live session
- * because of a network error. Returns `{ serverRevoked: true }` when the server
- * confirmed the revocation, `false` otherwise, so callers can surface a warning
- * without blocking sign-out.
- *
- * Pass `everywhere` to also deny every other token issued to this wallet.
- */
-export async function clearWalletSession(
-  options: { everywhere?: boolean } = {},
-): Promise<{ serverRevoked: boolean }> {
-  // After a reload the in-memory copy is gone but localStorage still holds a
-  // live token — read it back, or sign-out would revoke nothing in exactly the
-  // case that matters most.
-  const revoking = memoizedSession ?? readAnyStoredSession();
-  const revocationResult = revoking
-    ? await revokeOnServer(revoking, options.everywhere === true)
-    : { ok: true };
-
-  sessionEpoch += 1;
-  memoizedSession = null;
-  inFlight.clear();
-  if (memoizedClient) {
-    void memoizedClient.client.removeAllChannels();
-    memoizedClient = null;
-  }
-  if (typeof window !== "undefined") {
+    let response: Response;
     try {
-      window.localStorage.removeItem(LS_SESSION);
-    } catch {
-      // ignore
+      const result = await Promise.race([
+        fetch(url, { ...init, signal: controller.signal, cache: "no-store" }),
+        deadline,
+      ]);
+      if (result === "timeout") {
+        throw new WalletSessionError(
+          "The SettleX server took too long to respond. Please try signing in again.",
+        );
+      }
+      response = result;
+    } catch (error) {
+      if (error instanceof WalletSessionError) throw error;
+      throw new WalletSessionError(
+        timedOut || (error as Error | null)?.name === "AbortError"
+          ? "The SettleX server took too long to respond. Please try signing in again."
+          : "Cannot reach the SettleX server to sign in. Please check your connection.",
+      );
     }
+
+    let payload: unknown;
+    try {
+      const read = await Promise.race([
+        response.json().then((value: unknown) => ({ value })),
+        deadline,
+      ]);
+      if (read === "timeout") {
+        throw new WalletSessionError(
+          "The SettleX server took too long to respond. Please try signing in again.",
+        );
+      }
+      payload = read.value;
+    } catch {
+      if (timedOut) {
+        throw new WalletSessionError(
+          "The SettleX server took too long to respond. Please try signing in again.",
+        );
+      }
+      payload = null;
+    }
+    if (!response.ok) {
+      const message = (payload as { error?: unknown } | null)?.error;
+      throw new WalletSessionError(
+        typeof message === "string" ? message : `Sign-in failed (HTTP ${response.status}).`,
+      );
+    }
+    return payload as T;
+  } finally {
+    clearTimeout(timeout);
   }
-  notifySessionChange();
-  return { serverRevoked: revocationResult.ok };
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  return requestJson<T>(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 let memoizedSession: WalletSession | null = null;
-
-/**
- * In-flight handshakes, keyed by the wallet they are signing for.
- *
- * This was a single slot, which meant a call for wallet B arriving while A's
- * handshake was pending got handed A's promise -- and therefore A's token.
- * Nothing downstream re-checked the address, so the UI marked B verified while
- * every request went out signed as A. Keying by address is what lets two
- * wallets have distinct handshakes in flight; the per-address entry still
- * dedupes concurrent callers, so a wallet is asked to sign only once.
- */
-const inFlight = new Map<string, Promise<WalletSession>>();
-
-/**
- * Bumped by `clearWalletSession`. A handshake that started before the bump has
- * been disowned: signing out mid-handshake must not leave the browser holding
- * the session that lands a moment later.
- */
+let memoizedClient: SupabaseClient<Database> | null = null;
 let sessionEpoch = 0;
-
-// ─── Change notifications ─────────────────────────────────────────────────────
+const inFlight = new Map<string, Promise<WalletSession>>();
+let sessionLookup: Promise<WalletSession | null> | null = null;
 
 const listeners = new Set<() => void>();
 
@@ -304,92 +159,86 @@ function notifySessionChange(): void {
   listeners.forEach((listener) => listener());
 }
 
-/**
- * Notifies subscribers whenever the session is established or dropped, so
- * anything holding a client (a realtime subscription, say) can rebind to the
- * new token instead of quietly running on a stale one.
- *
- * Returns an unsubscribe function.
- */
 export function onSessionChange(listener: () => void): () => void {
   listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
+  return () => listeners.delete(listener);
 }
 
-// ─── Handshake ────────────────────────────────────────────────────────────────
-
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  // A hung connection must not park the handshake forever. `AbortSignal.timeout`
-  // is not in older Safari, so drive an AbortController on a timer instead --
-  // an unsupported browser would otherwise throw here rather than time out.
-  const controller = new AbortController();
-  const timedOutRef = { value: false };
-  let fireTimeout!: () => void;
-  // Resolves when the deadline passes, so the body read below can race against
-  // it. Aborting the request does not reject a body promise that has already
-  // been handed back, so the deadline needs its own settleable handle.
-  const deadline = new Promise<"timeout">((resolve) => {
-    fireTimeout = () => resolve("timeout");
-  });
-  const timer = setTimeout(() => {
-    timedOutRef.value = true;
-    controller.abort();
-    fireTimeout();
-  }, AUTH_REQUEST_TIMEOUT_MS);
-  const cancelTimeout = () => clearTimeout(timer);
-
-  let response: Response;
+function clearLegacyToken(): void {
+  if (typeof window === "undefined") return;
   try {
-    response = await fetch(url, {
+    window.localStorage.removeItem(LS_SESSION);
+  } catch {
+    // Storage may be disabled; no new token is written there.
+  }
+}
+
+clearLegacyToken();
+
+async function revokeOnServer(everywhere: boolean): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(SIGNOUT_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ everywhere }),
+      keepalive: true,
+      cache: "no-store",
       signal: controller.signal,
     });
-  } catch (err) {
-    cancelTimeout();
-    // Distinguish "we gave up waiting" from "the network refused us": the
-    // first is worth retrying as-is, the second usually is not.
-    const timedOut = timedOutRef.value || (err as Error | null)?.name === "TimeoutError";
-    throw new WalletSessionError(
-      timedOut
-        ? "The SettleX server took too long to respond. Please try signing in again."
-        : "Cannot reach the SettleX server to sign in. Please check your connection.",
-    );
-  }
-
-  // The deadline has to cover reading the body too: a server that sends headers
-  // and then stalls would otherwise hang here, past the fetch that the abort
-  // signal was watching.
-  let payload: unknown = null;
-  try {
-    const read = await Promise.race([
-      response.json().then((value: unknown) => ({ value })),
-      deadline,
-    ]);
-    if (read === "timeout") {
-      throw new WalletSessionError(
-        "The SettleX server took too long to respond. Please try signing in again.",
-      );
-    }
-    payload = read.value;
-  } catch (err) {
-    if (err instanceof WalletSessionError) throw err;
-    // A malformed body falls through to the status-based message below.
+    return response.ok;
+  } catch {
+    return false;
   } finally {
-    cancelTimeout();
+    clearTimeout(timeout);
   }
+}
 
-  if (!response.ok) {
-    const message = (payload as { error?: unknown } | null)?.error;
-    throw new WalletSessionError(
-      typeof message === "string" ? message : `Sign-in failed (HTTP ${response.status}).`,
-    );
+export async function clearWalletSession(
+  options: { everywhere?: boolean } = {},
+): Promise<{ serverRevoked: boolean }> {
+  sessionEpoch += 1;
+  memoizedSession = null;
+  sessionLookup = null;
+  inFlight.clear();
+  if (memoizedClient) {
+    void memoizedClient.removeAllChannels();
+    memoizedClient = null;
   }
+  clearLegacyToken();
+  notifySessionChange();
+  const serverRevoked = await revokeOnServer(options.everywhere === true);
+  return { serverRevoked };
+}
 
-  return payload as T;
+async function readServerSession(): Promise<WalletSession | null> {
+  if (sessionLookup) return sessionLookup;
+
+  const pending = (async () => {
+    const result = await requestJson<{
+      session: { walletAddress: string; expiresAt: number } | null;
+    }>("/api/auth/session", { method: "GET" });
+    if (!result.session) return null;
+
+    const { walletAddress, expiresAt } = result.session;
+    if (
+      typeof walletAddress !== "string" ||
+      !walletAddress ||
+      typeof expiresAt !== "number" ||
+      !Number.isFinite(expiresAt)
+    ) {
+      throw new WalletSessionError("The server returned an invalid session.");
+    }
+    const session = { walletAddress, expiresAt };
+    return isFresh(session) ? session : null;
+  })();
+  sessionLookup = pending;
+  try {
+    return await pending;
+  } finally {
+    if (sessionLookup === pending) sessionLookup = null;
+  }
 }
 
 async function runHandshake(walletAddress: string): Promise<WalletSession> {
@@ -403,8 +252,8 @@ async function runHandshake(walletAddress: string): Promise<WalletSession> {
   let signedTransactionXdr: string;
   try {
     signedTransactionXdr = await signXDR(challenge.transactionXdr, challenge.networkPassphrase);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
     throw new WalletSessionError(
       /reject|denied|cancel|declined/i.test(message)
         ? "Sign-in was cancelled in your wallet."
@@ -412,93 +261,60 @@ async function runHandshake(walletAddress: string): Promise<WalletSession> {
     );
   }
 
-  const verified = await postJson<{ accessToken: string; expiresAt: string }>(VERIFY_ENDPOINT, {
+  const verified = await postJson<{ walletAddress: string; expiresAt: string }>(VERIFY_ENDPOINT, {
     walletAddress,
     signedTransactionXdr,
     challengeToken: challenge.challengeToken,
   });
-
-  // Derive identity and expiry from the token, not the surrounding JSON, so
-  // the stored blob always agrees with what the token actually says.
-  const claims = decodeTokenClaims(verified.accessToken);
-  if (!claims || claims.walletAddress !== walletAddress) {
-    throw new WalletSessionError("The server returned a token for a different wallet.");
+  const expiresAt = Date.parse(verified.expiresAt);
+  if (
+    verified.walletAddress !== walletAddress ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= Date.now()
+  ) {
+    throw new WalletSessionError("The server returned a session for a different wallet.");
   }
 
-  const session: WalletSession = {
-    walletAddress: claims.walletAddress,
-    accessToken: verified.accessToken,
-    expiresAt: claims.expiresAt,
-  };
-
-  // A sign-out (or account switch) landed while we were signing. The token is
-  // real, but nobody is waiting for it any more -- caching it would resurrect a
-  // session the user just ended. Revoke it and report the handshake as void.
   if (epoch !== sessionEpoch) {
-    void revokeOnServer(session, false);
+    void revokeOnServer(false);
     throw new WalletSessionError("Sign-in was cancelled.");
   }
 
+  const session = { walletAddress, expiresAt };
   memoizedSession = session;
-  storeSession(session);
-  // Re-bind realtime on the active client so open subscriptions receive the
-  // new token immediately without dropping events.
-  if (memoizedClient) {
-    memoizedClient.token = session.accessToken;
-    memoizedClient.client.realtime.setAuth(session.accessToken);
-  }
+  clearLegacyToken();
   notifySessionChange();
   return session;
 }
 
 export interface SessionOptions {
-  /**
-   * Whether the wallet may be prompted for a signature. Pass `false` on
-   * background reads so the app never pops a wallet dialog unprompted.
-   */
   interactive?: boolean;
-  /**
-   * If true, bypass cached tokens and force a re-authentication handshake.
-   */
   forceRefresh?: boolean;
 }
 
-/**
- * Rebinds the realtime client to a new access token so active subscriptions
- * continue delivering changes without disruption.
- */
-export function rebindRealtimeAuth(accessToken: string): void {
-  if (memoizedClient) {
-    memoizedClient.token = accessToken;
-    memoizedClient.client.realtime.setAuth(accessToken);
-  }
-}
-
-/**
- * Returns a valid session for `walletAddress`, running the signing handshake if
- * no cached token is usable. Concurrent callers share one handshake, so the
- * wallet is only ever asked to sign once.
- */
 export async function getWalletSession(
   walletAddress: string,
   options: SessionOptions = {},
 ): Promise<WalletSession | null> {
   if (!walletAddress) throw new WalletSessionError("Wallet not connected.");
+  clearLegacyToken();
 
   if (!options.forceRefresh) {
-    // The memoized copy is rebuilt from claims when it is stored, but re-check
-    // ownership against the token so this path cannot drift from the stored one.
-    const memoized =
-      memoizedSession &&
-      decodeTokenClaims(memoizedSession.accessToken)?.walletAddress === walletAddress &&
+    if (
+      memoizedSession?.walletAddress === walletAddress &&
       isFresh(memoizedSession)
-        ? memoizedSession
-        : null;
-    const cached = memoized ?? readStoredSession(walletAddress);
+    ) {
+      return memoizedSession;
+    }
 
-    if (cached) {
-      memoizedSession = cached;
-      return cached;
+    const epoch = sessionEpoch;
+    const existing = await readServerSession();
+    if (epoch !== sessionEpoch) {
+      throw new WalletSessionError("Sign-in was cancelled.");
+    }
+    if (existing) {
+      memoizedSession = existing;
+      if (existing.walletAddress === walletAddress) return existing;
     }
   }
 
@@ -507,69 +323,67 @@ export async function getWalletSession(
   let pending = inFlight.get(walletAddress);
   if (!pending) {
     pending = runHandshake(walletAddress).finally(() => {
-      // Only drop our own entry: a later handshake for this address may have
-      // replaced it while this one was settling.
       if (inFlight.get(walletAddress) === pending) inFlight.delete(walletAddress);
     });
     inFlight.set(walletAddress, pending);
   }
-
   const session = await pending;
-
-  // Belt and braces. runHandshake already refuses a token minted for another
-  // wallet, but this is the single choke point every caller passes through, so
-  // returning a mismatched session here must be impossible by construction
-  // rather than by the good behaviour of everything upstream.
   if (session.walletAddress !== walletAddress) {
     throw new WalletSessionError("The session does not belong to the connected wallet.");
   }
-
   return session;
 }
 
-// ─── Authenticated client ─────────────────────────────────────────────────────
-
-let memoizedClient: { token: string; client: SupabaseClient<Database> } | null = null;
-
-function buildClient(accessToken: string): SupabaseClient<Database> {
-  if (memoizedClient?.token === accessToken) return memoizedClient.client;
-
-  if (memoizedClient) {
-    memoizedClient.client.realtime.setAuth(accessToken);
-    void memoizedClient.client.removeAllChannels();
+async function supabaseProxyFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const request = new Request(input, init);
+  const requestUrl = new URL(request.url);
+  const configuredUrl = new URL(supabaseUrl);
+  if (requestUrl.origin !== configuredUrl.origin || !requestUrl.pathname.startsWith("/rest/v1/")) {
+    throw new WalletSessionError("Only Supabase REST requests can use the authenticated proxy.");
+  }
+  if (typeof window === "undefined") {
+    throw new WalletSessionError("Authenticated database requests are only available in the browser.");
   }
 
-  const client = createClient<Database>(supabaseUrl, supabaseAnonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    realtime: { params: { eventsPerSecond: 10 } },
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+  const proxyUrl = new URL(
+    `/api/supabase/${requestUrl.pathname.slice(1)}${requestUrl.search}`,
+    window.location.origin,
+  );
+  const headers = new Headers(request.headers);
+  headers.delete("authorization");
+  headers.delete("apikey");
+
+  return fetch(proxyUrl, {
+    method: request.method,
+    headers,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    signal: request.signal,
+    credentials: "same-origin",
+    cache: "no-store",
   });
-
-  // Realtime authorizes on its own socket, so it needs the token too — without
-  // this, RLS-guarded change feeds deliver nothing.
-  client.realtime.setAuth(accessToken);
-
-  memoizedClient = { token: accessToken, client };
-  return client;
 }
 
-/**
- * Supabase client bound to a proven wallet identity. Returns `null` only when
- * `interactive: false` was requested and no cached session exists.
- */
+function buildClient(): SupabaseClient<Database> {
+  if (memoizedClient) return memoizedClient;
+  memoizedClient = createClient<Database>(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+    global: { fetch: supabaseProxyFetch },
+  });
+  return memoizedClient;
+}
+
 export async function getAuthenticatedClient(
   walletAddress: string,
   options: SessionOptions = {},
 ): Promise<SupabaseClient<Database> | null> {
   const session = await getWalletSession(walletAddress, options);
-  if (!session) return null;
-  return buildClient(session.accessToken);
+  return session ? buildClient() : null;
 }
 
-/**
- * Same as `getAuthenticatedClient`, but always prompts when no cached session
- * exists. Use it for writes, where proceeding unauthenticated is never right.
- */
 export async function requireAuthenticatedClient(
   walletAddress: string,
 ): Promise<SupabaseClient<Database>> {

@@ -27,11 +27,7 @@ jest.mock("@/lib/supabase/session", () => ({
   getAuthenticatedClient: jest.fn(),
   requireAuthenticatedClient: jest.fn(),
   clearWalletSession: jest.fn(),
-  readStoredSession: jest.fn(() => ({
-    walletAddress: WALLET,
-    accessToken: "token",
-    expiresAt: Date.now() + 3600_000,
-  })),
+  hasProvenSession: jest.fn(() => true),
   onSessionChange: jest.fn(() => () => {}),
 }));
 

@@ -1,7 +1,5 @@
 /** @jest-environment jsdom */
 
-import { createClient } from "@supabase/supabase-js";
-
 const WALLET_A = "GDQNY3PBOJOKYZSRMK2S7LHHGWZIUISD4QORETLMXEWXBI7KFZZMKTL3";
 const WALLET_B = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
 const mockRemoveAllChannels = jest.fn();
@@ -118,6 +116,7 @@ describe("concurrent wallet handshakes", () => {
     gate.resolve();
 
     await Promise.all([clientA, clientB]);
+    const { createClient } = require("@supabase/supabase-js");
     const createClientMock = createClient as jest.Mock;
     const options = createClientMock.mock.calls[0][2];
     expect(options.global.headers).toBeUndefined();

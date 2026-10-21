@@ -1,7 +1,7 @@
 # Supabase Setup
 
-SettleX uses Supabase (Postgres + Realtime) to sync trips, expenses, and
-payments across participants. It's optional for local single-browser use but
+SettleX uses Supabase Postgres to sync trips, expenses, and payments across
+participants through an authenticated Next.js REST proxy. It's optional for local single-browser use but
 required for multi-user sync.
 
 ## 1. Create a project
@@ -21,9 +21,11 @@ Project Settings → **API**:
 Add both to `.env.local`. The anon key is safe to expose **only** because RLS
 governs every row — see the security note below.
 
-## 4. Enable Realtime
-Database → Replication (or Realtime) → enable it for the SettleX tables so
-participants see payments live.
+## 4. Cross-user updates
+Expense and trip changes are refreshed every five seconds while a page is
+visible. Supabase Realtime is not used because its browser WebSocket requires
+exposing the JWT to JavaScript, which would defeat the HttpOnly-cookie session
+design. No Realtime publication setup is needed for these updates.
 
 ## ⚠️ Security: prove your RLS before going to production
 The anon key is public, so RLS is your **only** access wall. Before real users:

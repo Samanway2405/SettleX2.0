@@ -6,7 +6,8 @@ SettleX uses:
 
 - Next.js + TypeScript frontend
 - Next.js route handlers (`/api/auth/*`) for SEP-10 style wallet authentication
-- Supabase for app data and realtime sync
+- Supabase for app data via authenticated Next.js REST proxy; visible-page
+  expense/trip sync uses polling
 - Stellar payment operations for value transfer
 - Soroban settlement contract for immutable payment recording
 - Separate pool contract for inter-contract withdraw flow. `withdraw`
@@ -39,11 +40,19 @@ SettleX uses:
 - On success the server mints a Supabase JWT carrying `wallet_address`. Every
   RLS policy reads it through `public.settlex_wallet()`; requests without a
   valid token match no rows.
-- Sessions are cached in `localStorage` and last 1 hour by default
-  (`AUTH_SESSION_TTL_SECONDS`, capped at 12 hours). Renewing a session requires
-  wallet confirmation (SEP-10 challenge signing); the UI displays a visible
-  prompt before expiry so users can re-sign and rebind realtime connections
-  without losing incoming live updates.
+- The JWT is stored only in a `HttpOnly`, `SameSite=Lax` cookie and is never
+  returned to client JavaScript or stored in `localStorage`. Supabase REST calls
+  pass through `/api/supabase/*`, which validates the cookie and forwards the
+  JWT to PostgREST. Session metadata (wallet and expiry) is held in memory for
+  UI state; the cookie lasts 1 hour by default
+  (`AUTH_SESSION_TTL_SECONDS`, capped at 12 hours). Renewing requires wallet
+  confirmation (SEP-10 challenge signing), with a visible prompt before expiry.
+- Expense and trip changes are polled every five seconds while the page is
+  visible. Supabase Realtime WebSockets require a JWT in browser JavaScript, so
+  they are intentionally not used with the HttpOnly-cookie model. Polling is
+  less immediate and generates periodic requests, in exchange for preventing
+  JavaScript from extracting the bearer token. HttpOnly does not stop an active
+  XSS from making authenticated requests through the page.
 - Every token carries a `jti`. Signing out writes that id to
   `public.revoked_tokens`, and `settlex_wallet()` — the one function every RLS
   policy resolves identity through — returns NULL for a revoked token, so it
