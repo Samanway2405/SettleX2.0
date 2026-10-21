@@ -8,7 +8,7 @@
  * by every concurrent caller, the whole app sat on its loading state with no
  * way to recover short of a reload.
  */
-import { AUTH_REQUEST_TIMEOUT_MS, WALLET_CLAIM } from "@/lib/auth/constants";
+import { AUTH_REQUEST_TIMEOUT_MS } from "@/lib/auth/constants";
 
 const WALLET = "GDQNY3PBOJOKYZSRMK2S7LHHGWZIUISD4QORETLMXEWXBI7KFZZMKTL3";
 
@@ -22,16 +22,6 @@ jest.mock("@supabase/supabase-js", () => ({
     removeAllChannels: jest.fn(),
   })),
 }));
-
-function tokenFor(walletAddress: string): string {
-  const b64 = (value: unknown) =>
-    btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return [
-    b64({ alg: "HS256", typ: "JWT" }),
-    b64({ [WALLET_CLAIM]: walletAddress, exp: Math.floor(Date.now() / 1000) + 3600 }),
-    "sig",
-  ].join(".");
-}
 
 let session: typeof import("@/lib/supabase/session");
 
@@ -97,6 +87,13 @@ describe("handshake request timeout", () => {
 
     // The dead handshake must not be memoized: a retry gets a real one.
     global.fetch = jest.fn(async (url: string) => {
+      if (String(url).includes("/api/auth/session")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ session: null }),
+        };
+      }
       if (String(url).includes("challenge")) {
         return {
           ok: true,
@@ -112,7 +109,7 @@ describe("handshake request timeout", () => {
         ok: true,
         status: 200,
         json: async () => ({
-          accessToken: tokenFor(WALLET),
+          walletAddress: WALLET,
           expiresAt: new Date(Date.now() + 3600_000).toISOString(),
         }),
       };
@@ -147,6 +144,13 @@ describe("handshake request timeout", () => {
 
   it("does not time out a handshake that completes in time", async () => {
     global.fetch = jest.fn(async (url: string) => {
+      if (String(url).includes("/api/auth/session")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ session: null }),
+        };
+      }
       if (String(url).includes("challenge")) {
         return {
           ok: true,
@@ -162,7 +166,7 @@ describe("handshake request timeout", () => {
         ok: true,
         status: 200,
         json: async () => ({
-          accessToken: tokenFor(WALLET),
+          walletAddress: WALLET,
           expiresAt: new Date(Date.now() + 3600_000).toISOString(),
         }),
       };
