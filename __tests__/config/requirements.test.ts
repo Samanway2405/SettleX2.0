@@ -14,6 +14,7 @@ import {
 /** A fully configured production environment, as a starting point to break. */
 function completeEnv(): NodeJS.ProcessEnv {
   return {
+    NODE_ENV: "production",
     NEXT_PUBLIC_SUPABASE_URL: "https://project.supabase.co",
     NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon-key",
     NEXT_PUBLIC_CONTRACT_ID: "CCONTRACT",
