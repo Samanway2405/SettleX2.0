@@ -1,7 +1,5 @@
 #![no_std]
 
-pub mod pool;
-
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
     BytesN, Env, String, Vec,
@@ -888,7 +886,7 @@ impl SettleXContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::pool::{SettlementPoolContract, SettlementPoolContractClient};
+    use settlement_pool_contract::{SettlementPoolContract, SettlementPoolContractClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
         Address, Env, IntoVal, String,

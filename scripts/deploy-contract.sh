@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy and initialize both SettleX contract instances.
+# Build, deploy and initialize the separate SettleX settlement and pool contracts.
 #
 # Prerequisites:
 #   - Rust with the wasm32v1-none target
@@ -35,21 +35,35 @@ case "$NETWORK" in
     ;;
 esac
 
-WASM_PATH="contract/target/wasm32v1-none/release/settlex_contract.wasm"
+SETTLEMENT_WASM="contract/target/wasm32v1-none/release/settlex_contract.wasm"
+POOL_WASM="contract/target/wasm32v1-none/release/settlement_pool_contract.wasm"
 SETTLEMENT_SALT="534554544c455800000000000000000000000000000000000000000000000001"
-POOL_SALT="534554544c45585000000000000000000000000000000000000000000000000001"
+POOL_SALT="534554544c455850000000000000000000000000000000000000000000000001"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-echo "Building SettleX contracts for $NETWORK..."
+echo "Building settlement contract for $NETWORK..."
 stellar contract build \
   --manifest-path contract/Cargo.toml \
   --package settlex-contract \
   --optimize
 
+echo "Building pool contract for $NETWORK..."
+stellar contract build \
+  --manifest-path contract/Cargo.toml \
+  --package settlement-pool-contract \
+  --optimize
+
+for wasm in "$SETTLEMENT_WASM" "$POOL_WASM"; do
+  if [[ ! -f "$wasm" ]]; then
+    echo "Expected WASM was not produced: $wasm" >&2
+    exit 1
+  fi
+done
+
 echo "Deploying settlement contract with atomic constructor..."
 stellar contract deploy \
-    --wasm "$WASM_PATH" \
+    --wasm "$SETTLEMENT_WASM" \
     --source-account "$ACCOUNT" \
     --network "$NETWORK" \
     --salt "$SETTLEMENT_SALT" \
@@ -65,7 +79,7 @@ fi
 
 echo "Deploying pool contract with atomic constructor..."
 stellar contract deploy \
-    --wasm "$WASM_PATH" \
+    --wasm "$POOL_WASM" \
     --source-account "$ACCOUNT" \
     --network "$NETWORK" \
     --salt "$POOL_SALT" \

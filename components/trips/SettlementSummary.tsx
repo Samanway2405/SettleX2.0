@@ -74,6 +74,7 @@ function deriveRawDebts(expenses: Expense[], onChainEvents: ContractPaymentEvent
         from:       share.name,
         fromId:     share.memberId,
         to:         payer.name,
+        toId:       payer.id,
         amount:     share.amount,
         fromWallet: share.walletAddress,
         toWallet:   payer.walletAddress,
