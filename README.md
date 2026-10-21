@@ -77,7 +77,7 @@ Every payment produces a **real, verifiable transaction hash** on the Stellar bl
 | Real-time event listening from contract (`pmt_rec` events)   | Live   |
 | Attestor-backed payment verification                         | Not live yet |
 | Trip mode — group expenses with net-balance settle-up        | Live   |
-| Live cross-user sync via Supabase Realtime                   | Live   |
+| Cross-user expense/trip sync via secure 5-second polling     | Live   |
 | Net-balance algorithm (minimises transactions needed)        | Live   |
 | Mobile-responsive UI                                         | Live   |
 
@@ -93,10 +93,10 @@ Every payment produces a **real, verifiable transaction hash** on the Stellar bl
 | Wallet support   | `@creit.tech/stellar-wallets-kit` v2          |
 | Smart contract   | Soroban (Rust, `soroban-sdk` v21)              |
 | Network          | Stellar Testnet (Horizon + Soroban RPC)        |
-| Database         | Supabase (PostgreSQL + Realtime)               |
+| Database         | Supabase (PostgreSQL via authenticated Next.js proxy) |
 | QR codes         | `qrcode.react`                                 |
 | Testing          | Jest 29 + ts-jest (45 unit tests)              |
-| State management | React Context + Supabase + localStorage        |
+| State management | React Context + HttpOnly session cookie + localStorage cache |
 | UI primitives    | Radix UI, Lucide React                         |
 
 ---
@@ -460,7 +460,7 @@ AUTH_SESSION_TTL_SECONDS=43200
 
 > Variables with the `NEXT_PUBLIC_` prefix are read client-side and are inlined into the JavaScript bundle — treat every one of them as public. The Supabase anon key is safe to expose because access is governed by Row Level Security.
 >
-> `SUPABASE_JWT_SECRET` and `AUTH_CHALLENGE_SECRET` are **not** public. They are read only inside the `/api/auth/*` route handlers. Prefixing either with `NEXT_PUBLIC_` would ship it to every visitor and let anyone mint a token for any wallet.
+> `SUPABASE_JWT_SECRET` and `AUTH_CHALLENGE_SECRET` are **not** public. They are read only inside server-side auth and Supabase proxy route handlers. Prefixing either with `NEXT_PUBLIC_` would ship it to every visitor and let anyone mint a token for any wallet.
 
 ---
 
@@ -471,9 +471,9 @@ Your Stellar address is your identity, and the app proves you control it before 
 1. **Challenge** — `POST /api/auth/challenge` returns a transaction built for your address with **sequence number 0**, carrying a random nonce. Sequence 0 is always below an account's real sequence, so the network can never accept it: it is signable but unsubmittable, and costs no fee.
 2. **Sign** — your wallet (Freighter, xBull, Lobstr) signs it locally. Your private key never leaves the extension.
 3. **Verify** — `POST /api/auth/verify` checks the signature against the claimed public key and, only on success, mints a short-lived Supabase JWT whose `wallet_address` claim carries the proven address. The token is signed with `SUPABASE_JWT_SECRET`, which never reaches the browser.
-4. **Authorize** — every RLS policy reads that claim via `public.settlex_wallet()`. Requests without a valid token get no rows at all.
+4. **Authorize** — `/api/auth/verify` sets the JWT as an `HttpOnly`, `SameSite=Lax` cookie and does not return it in JSON. Supabase REST calls go through same-origin Next.js handlers, which validate the cookie and forward the JWT to PostgREST. Every RLS policy reads the claim via `public.settlex_wallet()`; requests without a valid token get no rows.
 
-The token is cached in `localStorage` and reused until it expires (12 hours by default), so you sign roughly once a day rather than once per action.
+The browser never reads or stores the JWT in `localStorage`; only non-secret session metadata is held in memory. The cookie survives reloads until expiry (one hour by default, configurable up to 12 hours), so a valid session can be checked on reload without another signature. Near expiry, the UI asks the wallet to sign again. Because an HttpOnly cookie cannot authenticate a browser WebSocket, expense and trip updates use five-second polling while the page is visible instead of Supabase Realtime. This is slightly less immediate but keeps the bearer token out of JavaScript. HttpOnly prevents token extraction, but an XSS can still perform actions through the active page until the session expires or is signed out.
 
 > **Upgrading an existing deployment:** earlier versions authorized on an `x-wallet-address` request header that the browser set itself. Because the anon key is public, anyone could send that header with any address and read or modify every user's data. Re-run [`supabase-setup.sql`](supabase-setup.sql) to replace those policies and set `SUPABASE_JWT_SECRET`. Until you do, the data layer is effectively unauthenticated.
 

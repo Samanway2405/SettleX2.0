@@ -40,8 +40,7 @@ function mockFetchWithStatus(status: number) {
 }
 
 function seedLocalSession() {
-  // A minimal JWT with a future exp so readAnyStoredSession() returns it.
-  // payload: { wallet_address: "GWALLET", exp: 9999999999 }
+  // A legacy token must be removed, never reused as browser authentication.
   const payload = btoa(JSON.stringify({ wallet_address: "GWALLET", exp: 9999999999 }));
   const token = `header.${payload}.sig`;
   try {
@@ -99,10 +98,14 @@ describe("Issue #125: sign-out revocation warning — clearWalletSession()", () 
     expect(localStorage.getItem("settlex:session")).toBeNull();
   });
 
-  it("returns { serverRevoked: true } when no session exists (nothing to revoke)", async () => {
-    // No localStorage session seeded — revoking = null, so we skip fetch.
+  it("still calls the server to clear the HttpOnly cookie when no local state exists", async () => {
+    mockFetchWithStatus(200);
     const result = await sessionModule.clearWalletSession();
     expect(result.serverRevoked).toBe(true);
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/auth/signout"),
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });
 
